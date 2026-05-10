@@ -662,9 +662,9 @@ export default function App() {
       await apiUpdate(cfg.binId, cfg.apiKey, sectionsToRemote(nextSections));
       setSyncState("saved");
       showToast("✓ Synchronisé", "sync");
-    } catch {
+    } catch(e) {
       setSyncState("error");
-      showToast("⚠ Erreur de sauvegarde", "err");
+      showToast("⚠ " + (e.message||"Erreur de sauvegarde"), "err", 6000);
     }
   }, [cfg]);
 
