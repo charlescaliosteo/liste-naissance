@@ -654,28 +654,39 @@ export default function App() {
     return () => clearInterval(t);
   }, [cfg?.binId, isOwner]);
 
-  // ── Debounced save (owner + contributor) ──
+  // ── Save helpers ──
+  const doSave = useCallback(async (nextSections) => {
+    if (cfg?.mode !== "owner" && cfg?.mode !== "contributor") return;
+    setSyncState("saving");
+    try {
+      await apiUpdate(cfg.binId, cfg.apiKey, sectionsToRemote(nextSections));
+      setSyncState("saved");
+      showToast("✓ Synchronisé", "sync");
+    } catch {
+      setSyncState("error");
+      showToast("⚠ Erreur de sauvegarde", "err");
+    }
+  }, [cfg]);
+
   const scheduleSave = useCallback((nextSections) => {
     if (cfg?.mode !== "owner" && cfg?.mode !== "contributor") return;
     setSyncState("saving");
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      try {
-        await apiUpdate(cfg.binId, cfg.apiKey, sectionsToRemote(nextSections));
-        setSyncState("saved");
-        showToast("✓ Synchronisé", "sync");
-      } catch {
-        setSyncState("error");
-        showToast("⚠ Erreur de sauvegarde", "err");
-      }
-    }, 900);
-  }, [cfg]);
+    saveTimer.current = setTimeout(() => doSave(nextSections), 900);
+  }, [cfg, doSave]);
 
   function update(fn) {
     setSections(prev => { const next = fn(prev); scheduleSave(next); return next; });
   }
   function updateItem(secId, itemId, patch) {
     update(secs => secs.map(s => s.id!==secId?s:{ ...s, items:s.items.map(i=>i.id!==itemId?i:{ ...i,...patch }) }));
+  }
+  function updateItemNow(secId, itemId, patch) {
+    setSections(prev => {
+      const next = prev.map(s => s.id!==secId?s:{ ...s, items:s.items.map(i=>i.id!==itemId?i:{ ...i,...patch }) });
+      doSave(next);
+      return next;
+    });
   }
   function addItem(secId, name, note, url) {
     const chosen = url ? { brand:"", url, price:"", notes:"" } : null;
@@ -826,7 +837,7 @@ export default function App() {
                     onDelete={()=>deleteItem(sec.id,it.id)}
                     onEdit={()=>setModal({type:"edit",secId:sec.id,itemId:it.id})}
                     onReserve={()=>setModal({type:"reserve",secId:sec.id,itemId:it.id})}
-                    onClearReserve={()=>updateItem(sec.id,it.id,{reservedBy:null})}
+                    onClearReserve={()=>updateItemNow(sec.id,it.id,{reservedBy:null})}
                   />
                 ))}
               </div>
@@ -870,7 +881,7 @@ export default function App() {
       {modal?.type==="addItem"&&mSec&&<AddItemModal sectionTitle={mSec.title} onAdd={(n,no,u)=>addItem(modal.secId,n,no,u)} onClose={()=>setModal(null)}/>}
       {modal?.type==="edit"&&mItem&&<EditItemModal item={mItem} onSave={(n,no)=>{updateItem(modal.secId,modal.itemId,{name:n,note:no});setModal(null);showToast("✓ Modifié");}} onClose={()=>setModal(null)}/>}
       {modal?.type==="addSection"&&<AddSectionModal onAdd={addSection} onClose={()=>setModal(null)}/>}
-      {modal?.type==="reserve"&&mItem&&<ReserveModal item={mItem} color={mSec.color} onSave={r=>{updateItem(modal.secId,modal.itemId,{reservedBy:r});setModal(null);showToast("🎁 Réservé ! Merci !");}} onClose={()=>setModal(null)}/>}
+      {modal?.type==="reserve"&&mItem&&<ReserveModal item={mItem} color={mSec.color} onSave={r=>{updateItemNow(modal.secId,modal.itemId,{reservedBy:r});setModal(null);showToast("🎁 Acheté ! Merci !");}} onClose={()=>setModal(null)}/>}
       {showSettings&&<SettingsModal cfg={cfg} onClose={()=>setShowSettings(false)} onReset={()=>{localStorage.removeItem(LOCAL_CFG);setCfg(null);setShowSettings(false);}}/>}
 
       <Toast msg={toast.msg} type={toast.type}/>
