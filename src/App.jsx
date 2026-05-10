@@ -76,8 +76,26 @@ const DEFAULT_SECTIONS = [
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function uid() { return Math.random().toString(36).slice(2,8); }
-function loadCfg() { try { return JSON.parse(localStorage.getItem(LOCAL_CFG)); } catch { return null; } }
-function saveCfg(c) { try { localStorage.setItem(LOCAL_CFG, JSON.stringify(c)); } catch {} }
+
+function saveCfg(c) {
+  try { localStorage.setItem(LOCAL_CFG, JSON.stringify(c)); } catch {}
+  try {
+    const expires = new Date(Date.now() + 365*24*60*60*1000).toUTCString();
+    document.cookie = `${LOCAL_CFG}=${encodeURIComponent(JSON.stringify(c))};expires=${expires};path=/;SameSite=Lax`;
+  } catch {}
+}
+function loadCfg() {
+  try {
+    const ls = JSON.parse(localStorage.getItem(LOCAL_CFG));
+    if (ls) return ls;
+  } catch {}
+  try {
+    const match = document.cookie.split(";").find(c => c.trim().startsWith(LOCAL_CFG + "="));
+    if (match) return JSON.parse(decodeURIComponent(match.split("=").slice(1).join("=")));
+  } catch {}
+  return null;
+}
+
 function safeUrl(u) { return u && /^https?:\/\//i.test(u.trim()) ? u.trim() : null; }
 
 function buildInitialData() {
