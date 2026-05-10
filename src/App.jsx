@@ -403,10 +403,20 @@ function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenChosen,
           </div>
           {item.note&&<div style={{ fontSize:12,color:"#9a8a7a",fontWeight:300,lineHeight:1.5 }}>{item.note}</div>}
         </div>
-        <div style={{ display:"flex",gap:5,flexShrink:0,alignItems:"center" }}>
+        <div style={{ display:"flex",gap:5,flexShrink:0,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end" }}>
           {isOwner && item.custom && <button onClick={onEdit} style={{ width:28,height:28,borderRadius:7,border:"1.5px solid #e8ddd0",background:"transparent",color:"#9a8a7a",cursor:"pointer",fontSize:13,display:"flex",alignItems:"center",justifyContent:"center" }}>✏️</button>}
           {isOwner && <button onClick={onOpenChosen} style={{ width:28,height:28,borderRadius:7,border:`1.5px solid ${has?color:"#e8ddd0"}`,background:has?`${color}15`:"transparent",color:has?color:"#b0a090",cursor:"pointer",fontSize:has?13:20,display:"flex",alignItems:"center",justifyContent:"center" }}>{has?"✏️":"＋"}</button>}
           {isOwner && item.custom && <button onClick={onDelete} style={{ width:28,height:28,borderRadius:7,border:"1.5px solid rgba(196,131,106,.25)",background:"rgba(196,131,106,.06)",color:C.terra,cursor:"pointer",fontSize:13,display:"flex",alignItems:"center",justifyContent:"center" }}>🗑️</button>}
+          {isOwner && !item.checked && (
+            <button onClick={onToggle} style={{ ...btn({background:"#7a9e87",color:"white"}), padding:"5px 14px", fontSize:12, borderRadius:8 }}>
+              ✓ J'ai reçu
+            </button>
+          )}
+          {isOwner && item.checked && (
+            <button onClick={onToggle} style={{ ...btn({background:"rgba(196,131,106,.1)",color:C.terra,border:"1.5px solid rgba(196,131,106,.3)"}), padding:"5px 12px", fontSize:12, borderRadius:8 }}>
+              ↩ Annuler
+            </button>
+          )}
           {canReserve && (
             <button onClick={onReserve} style={{ ...btn({background:"#7a9e87",color:"white"}), padding:"5px 14px", fontSize:12, borderRadius:8 }}>
               🎁 J'achète
