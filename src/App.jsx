@@ -372,7 +372,7 @@ function ReserveModal({ item, color, onSave, onClose }) {
           onClick={()=>{ if(name.trim()) onSave({ name:name.trim(), note:note.trim(), date:new Date().toISOString() }); }}
           style={{ ...btn({background:"#7a9e87",color:"white",opacity:name.trim()?1:.45}), flex:1, padding:"12px 0" }}
         >
-          🎁 Je réserve cet article
+          🎁 J'achète cet article
         </button>
         <button onClick={onClose} style={btn({background:"white",color:"#7a6a5a",border:"1.5px solid #e8ddd0"})}>Annuler</button>
       </div>
