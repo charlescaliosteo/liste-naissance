@@ -428,9 +428,9 @@ function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenChosen,
             </span>
           )}
           {res && !isOwner && !canReserve && !item.checked && (
-            <span style={{ fontSize:11,fontWeight:700,color:"#5a8a6a",background:"rgba(122,158,135,.12)",borderRadius:8,padding:"4px 10px",whiteSpace:"nowrap" }}>
-              🎁 Acheté
-            </span>
+            <button onClick={onClearReserve} style={{ ...btn({background:"rgba(196,131,106,.1)",color:C.terra,border:"1.5px solid rgba(196,131,106,.3)"}), padding:"5px 12px", fontSize:12, borderRadius:8 }}>
+              ↩ Annuler
+            </button>
           )}
         </div>
       </div>
