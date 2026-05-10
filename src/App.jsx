@@ -199,7 +199,10 @@ function SetupScreen({ onDone }) {
   const [tab, setTab] = useState("owner");
   const [apiKey, setApiKey] = useState("");
   const [binId, setBinId] = useState("");
+  const [reconnectKey, setReconnectKey] = useState("");
+  const [reconnectBinId, setReconnectBinId] = useState("");
   const [showKey, setShowKey] = useState(false);
+  const [showReconnectKey, setShowReconnectKey] = useState(false);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
 
@@ -215,6 +218,18 @@ function SetupScreen({ onDone }) {
     setLoading(false);
   }
 
+  async function handleReconnect() {
+    if (!reconnectBinId.trim()) return setErr("Veuillez entrer votre BIN ID.");
+    if (!reconnectKey.trim()) return setErr("Veuillez entrer votre Master Key.");
+    setLoading(true); setErr("");
+    try {
+      await apiRead(reconnectBinId.trim(), reconnectKey.trim());
+      const cfg = { apiKey: reconnectKey.trim(), binId: reconnectBinId.trim(), mode:"owner" };
+      saveCfg(cfg); onDone(cfg);
+    } catch(e) { setErr("BIN ID ou clé incorrects. Vérifiez vos informations."); }
+    setLoading(false);
+  }
+
   async function handleReader() {
     if (!binId.trim()) return setErr("Veuillez entrer le BIN ID partagé.");
     setLoading(true); setErr("");
@@ -226,7 +241,7 @@ function SetupScreen({ onDone }) {
     setLoading(false);
   }
 
-  const tabStyle = (active) => ({ flex:1, padding:"10px 0", borderRadius:10, border:"none", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", background:active?C.ink:"transparent", color:active?C.cream:"#9a8a7a", transition:"all .2s" });
+  const tabStyle = (active) => ({ flex:1, padding:"9px 0", borderRadius:10, border:"none", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", background:active?C.ink:"transparent", color:active?C.cream:"#9a8a7a", transition:"all .2s" });
 
   return (
     <div style={{ minHeight:"100vh", background:C.cream, display:"flex", alignItems:"center", justifyContent:"center", padding:20, fontFamily:"'DM Sans',sans-serif" }}>
@@ -237,7 +252,8 @@ function SetupScreen({ onDone }) {
         </div>
 
         <div style={{ display:"flex", gap:6, background:C.warm, borderRadius:14, padding:6, marginBottom:24 }}>
-          <button style={tabStyle(tab==="owner")} onClick={()=>{setTab("owner");setErr("")}}>👶 Je suis le parent</button>
+          <button style={tabStyle(tab==="owner")} onClick={()=>{setTab("owner");setErr("")}}>👶 Créer ma liste</button>
+          <button style={tabStyle(tab==="reconnect")} onClick={()=>{setTab("reconnect");setErr("")}}>🔑 Je reviens</button>
           <button style={tabStyle(tab==="reader")} onClick={()=>{setTab("reader");setErr("")}}>🎁 J'ai reçu un lien</button>
         </div>
 
@@ -259,6 +275,25 @@ function SetupScreen({ onDone }) {
             {err && <div style={{ color:C.terra, fontSize:13, marginBottom:12 }}>⚠ {err}</div>}
             <button onClick={handleOwner} disabled={loading} style={{ ...btn({ background:C.ink, color:C.cream }), width:"100%", padding:"13px 0", fontSize:14 }}>
               {loading ? "Création de la liste…" : "Créer ma liste partagée →"}
+            </button>
+          </div>
+        )}
+
+        {tab === "reconnect" && (
+          <div>
+            <div style={{ background:"rgba(196,131,106,.07)", border:"1.5px solid rgba(196,131,106,.2)", borderRadius:12, padding:"12px 14px", marginBottom:18, fontSize:13, color:C.slate, lineHeight:1.6 }}>
+              Retrouvez votre liste existante. Votre <strong>BIN ID</strong> se trouve dans les paramètres ⚙️ de votre liste.
+            </div>
+            <FL>BIN ID de votre liste</FL>
+            <FInput value={reconnectBinId} onChange={setReconnectBinId} placeholder="Ex : 6849fa3ce41b4d34f8a1..."/>
+            <FL>Master Key JSONbin</FL>
+            <div style={{ position:"relative" }}>
+              <FInput value={reconnectKey} onChange={setReconnectKey} placeholder="$2b$10$..." type={showReconnectKey?"text":"password"}/>
+              <button onClick={()=>setShowReconnectKey(v=>!v)} style={{ position:"absolute", right:10, top:10, background:"none", border:"none", cursor:"pointer", color:"#9a8a7a", fontSize:16 }}>{showReconnectKey?"🙈":"👁️"}</button>
+            </div>
+            {err && <div style={{ color:C.terra, fontSize:13, marginBottom:12 }}>⚠ {err}</div>}
+            <button onClick={handleReconnect} disabled={loading} style={{ ...btn({ background:C.ink, color:C.cream }), width:"100%", padding:"13px 0", fontSize:14 }}>
+              {loading ? "Connexion…" : "Me reconnecter →"}
             </button>
           </div>
         )}
