@@ -529,10 +529,12 @@ function SettingsModal({ cfg, onClose, onReset }) {
   const [showFamilyKey, setShowFamilyKey] = useState(false);
   const [copiedReader, setCopiedReader] = useState(false);
   const [copiedFamily, setCopiedFamily] = useState(false);
+  const [copiedCoparent, setCopiedCoparent] = useState(false);
 
   const base = window.location.origin + window.location.pathname;
-  const readerUrl   = `${base}?binId=${cfg.binId}`;
-  const familyUrl   = familyKey.trim() ? `${base}?binId=${cfg.binId}&ck=${familyKey.trim()}` : "";
+  const readerUrl    = `${base}?binId=${cfg.binId}`;
+  const familyUrl    = familyKey.trim() ? `${base}?binId=${cfg.binId}&ck=${familyKey.trim()}` : "";
+  const coparentUrl  = cfg.apiKey ? `${base}?binId=${cfg.binId}&ck=${cfg.apiKey}&mode=owner` : "";
 
   function copyText(text, setCopied) {
     navigator.clipboard?.writeText(text).then(()=>{ setCopied(true); setTimeout(()=>setCopied(false), 2500); }).catch(()=>{
@@ -557,6 +559,19 @@ function SettingsModal({ cfg, onClose, onReset }) {
           {copiedReader ? "✓ Copié !" : "📋 Copier le lien lecture seule"}
         </button>
       </div>
+
+      {/* Co-parent link — owner only */}
+      {cfg.mode === "owner" && coparentUrl && (
+        <div style={{ background:"rgba(196,131,106,.06)",border:"1.5px solid rgba(196,131,106,.2)",borderRadius:12,padding:"14px 16px",marginBottom:12 }}>
+          <div style={{ fontSize:11,letterSpacing:2,textTransform:"uppercase",color:C.terra,marginBottom:4,fontWeight:700 }}>👶 Lien co-parent (accès complet)</div>
+          <div style={{ fontSize:12,color:"#7a6a5a",lineHeight:1.6,marginBottom:12 }}>
+            Partagez ce lien à votre compagne/compagnon. Il/elle aura le même accès que vous — cocher, modifier, gérer la liste. <strong>Ne partagez qu'avec votre co-parent.</strong>
+          </div>
+          <button onClick={()=>copyText(coparentUrl, setCopiedCoparent)} style={{ ...btn({background:C.terra,color:"white"}), width:"100%", padding:"9px 0", fontSize:13 }}>
+            {copiedCoparent ? "✓ Lien copié ! Envoyez-le sur WhatsApp 🎉" : "🔗 Copier le lien co-parent"}
+          </button>
+        </div>
+      )}
 
       {/* Contributor link — owner only */}
       {cfg.mode === "owner" && (
@@ -599,7 +614,8 @@ export default function App() {
   const [cfg, setCfg] = useState(() => {
     // Connexion automatique via URL params (lien WhatsApp famille)
     const p = new URLSearchParams(window.location.search);
-    const bid = p.get("binId"), ck = p.get("ck");
+    const bid = p.get("binId"), ck = p.get("ck"), m = p.get("mode");
+    if (bid && ck && m === "owner") { const c = { binId:bid, apiKey:ck, mode:"owner" }; saveCfg(c); return c; }
     if (bid && ck)  return { binId:bid, apiKey:ck, mode:"contributor" };
     if (bid)        return { binId:bid, mode:"reader" };
     return loadCfg();
