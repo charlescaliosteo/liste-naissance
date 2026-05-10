@@ -481,24 +481,31 @@ function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenChosen,
             </span>
           )}
           {res && !isOwner && !canReserve && !item.checked && (
-            <button onClick={onClearReserve} style={{ ...btn({background:"rgba(196,131,106,.1)",color:C.terra,border:"1.5px solid rgba(196,131,106,.3)"}), padding:"5px 12px", fontSize:12, borderRadius:8 }}>
-              ↩ Annuler
-            </button>
+            <span style={{ fontSize:11,fontWeight:700,color:"#5a8a6a",background:"rgba(122,158,135,.12)",borderRadius:8,padding:"4px 10px",whiteSpace:"nowrap" }}>
+              🎁 J'achète
+            </span>
           )}
         </div>
       </div>
 
       {/* Reservation banner */}
       {res && !item.checked && (
-        <div style={{ margin:"0 13px 11px",borderRadius:10,padding:"9px 14px",borderLeft:"3px solid #7a9e87",background:"rgba(122,158,135,.09)",display:"flex",alignItems:"flex-start",gap:10 }}>
-          <span style={{ fontSize:16 }}>🎁</span>
-          <div style={{ flex:1 }}>
-            <div style={{ fontSize:13,fontWeight:700,color:"#4a7a5a" }}>Réservé par {res.name}</div>
-            {res.note && <div style={{ fontSize:12,color:"#6a7a6a",marginTop:2,lineHeight:1.4 }}>{res.note}</div>}
+        <div style={{ margin:"0 13px 11px",borderRadius:10,padding:"9px 14px",borderLeft:"3px solid #7a9e87",background:"rgba(122,158,135,.09)" }}>
+          <div style={{ display:"flex",alignItems:"flex-start",gap:10 }}>
+            <span style={{ fontSize:16 }}>🎁</span>
+            <div style={{ flex:1 }}>
+              <div style={{ fontSize:13,fontWeight:700,color:"#4a7a5a" }}>Réservé par {res.name}</div>
+              {res.note && <div style={{ fontSize:12,color:"#6a7a6a",marginTop:2,lineHeight:1.4 }}>{res.note}</div>}
+            </div>
+            {isOwner && (
+              <button onClick={onClearReserve} style={{ fontSize:11,color:"#9a8a7a",background:"none",border:"1px solid #d8cdc0",borderRadius:6,cursor:"pointer",padding:"3px 9px",flexShrink:0 }}>
+                Libérer
+              </button>
+            )}
           </div>
-          {isOwner && (
-            <button onClick={onClearReserve} style={{ fontSize:11,color:"#9a8a7a",background:"none",border:"1px solid #d8cdc0",borderRadius:6,cursor:"pointer",padding:"3px 9px",flexShrink:0 }}>
-              Libérer
+          {isContributor && (
+            <button onClick={onClearReserve} style={{ marginTop:10,width:"100%",padding:"8px 0",borderRadius:8,border:"1.5px solid rgba(196,131,106,.4)",background:"rgba(196,131,106,.08)",color:C.terra,fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"'DM Sans',sans-serif" }}>
+              ↩ Annuler mon achat
             </button>
           )}
         </div>
