@@ -422,9 +422,14 @@ function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenChosen,
               🎁 J'achète
             </button>
           )}
-          {res && !isOwner && !canReserve && (
+          {item.checked && !isOwner && (
+            <span style={{ fontSize:11,fontWeight:700,color:"#5a8a6a",background:"rgba(122,158,135,.15)",borderRadius:8,padding:"4px 10px",whiteSpace:"nowrap" }}>
+              ✓ Reçu
+            </span>
+          )}
+          {res && !isOwner && !canReserve && !item.checked && (
             <span style={{ fontSize:11,fontWeight:700,color:"#5a8a6a",background:"rgba(122,158,135,.12)",borderRadius:8,padding:"4px 10px",whiteSpace:"nowrap" }}>
-              ✓ Pris
+              🎁 Acheté
             </span>
           )}
         </div>
