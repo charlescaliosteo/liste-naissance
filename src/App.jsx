@@ -122,6 +122,14 @@ function mergeData(remote) {
         checked:    itemsMap[di.id]?.checked    || false,
         chosen:     itemsMap[di.id]?.chosen     || null,
         reservedBy: itemsMap[di.id]?.reservedBy || null,
+        models: (() => {
+          const saved = itemsMap[di.id]?.models||[];
+          if (saved.length) return saved;
+          const c = itemsMap[di.id]?.chosen;
+          if (!c) return [];
+          const arr = Array.isArray(c)?c:[c];
+          return arr.filter(e=>e.brand||e.url||e.price||e.notes).map((e,i)=>({ id:`mg_${di.id}_${i}`, name:e.brand||`Option ${i+1}`, url:e.url||"", price:e.price||"", notes:e.notes||"", reservedBy:null }));
+        })(),
       })).concat((rem.customItems||[]).map(ci => ({ ...ci, custom:true }))),
     };
   });
@@ -139,12 +147,12 @@ function sectionsToRemote(sections) {
     updatedAt: new Date().toISOString(),
     sections: sections.filter(s => defaultIds.has(s.id)).map(s => ({
       id: s.id,
-      items: s.items.filter(i => !i.custom).map(i => ({ id:i.id, checked:i.checked, chosen:i.chosen, reservedBy:i.reservedBy||null })),
-      customItems: s.items.filter(i => i.custom).map(i => ({ id:i.id, name:i.name, note:i.note, tags:i.tags||[], checked:i.checked, chosen:i.chosen, reservedBy:i.reservedBy||null, custom:true })),
+      items: s.items.filter(i => !i.custom).map(i => ({ id:i.id, checked:i.checked, chosen:i.chosen, reservedBy:i.reservedBy||null, models:i.models||[] })),
+      customItems: s.items.filter(i => i.custom).map(i => ({ id:i.id, name:i.name, note:i.note, tags:i.tags||[], checked:i.checked, chosen:i.chosen, reservedBy:i.reservedBy||null, models:i.models||[], custom:true })),
     })),
     customSections: sections.filter(s => !defaultIds.has(s.id)).map(s => ({
       id:s.id, title:s.title, label:s.label||"Personnalisé", priority:s.priority,
-      items: s.items.map(i => ({ id:i.id, name:i.name, note:i.note||"", tags:i.tags||[], checked:i.checked, chosen:i.chosen, reservedBy:i.reservedBy||null, custom:true })),
+      items: s.items.map(i => ({ id:i.id, name:i.name, note:i.note||"", tags:i.tags||[], checked:i.checked, chosen:i.chosen, reservedBy:i.reservedBy||null, models:i.models||[], custom:true })),
     })),
   };
 }
@@ -336,19 +344,54 @@ function SetupScreen({ onDone }) {
 
 // ─── Modals ───────────────────────────────────────────────────────────────────
 function ChosenModal({ item, color, onSave, onClose }) {
-  const [f, setF] = useState(item.chosen || { brand:"", url:"", price:"", notes:"" });
-  const up = (k,v) => setF(p=>({...p,[k]:v}));
+  const init = () => {
+    const c = item.chosen;
+    if (!c) return [{ brand:"", url:"", price:"", notes:"" }];
+    if (Array.isArray(c)) return c.length ? c.map(e=>({...e})) : [{ brand:"", url:"", price:"", notes:"" }];
+    return [{ ...c }];
+  };
+  const [entries, setEntries] = useState(init);
+
+  function upEntry(idx, k, v) {
+    setEntries(prev => prev.map((e, i) => i === idx ? { ...e, [k]: v } : e));
+  }
+  function addEntry() {
+    setEntries(prev => [...prev, { brand:"", url:"", price:"", notes:"" }]);
+  }
+  function removeEntry(idx) {
+    setEntries(prev => prev.length > 1 ? prev.filter((_, i) => i !== idx) : [{ brand:"", url:"", price:"", notes:"" }]);
+  }
+  function handleSave() {
+    const cleaned = entries.filter(e => e.brand||e.url||e.price||e.notes);
+    onSave(cleaned.length ? cleaned : null);
+  }
+
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize:10,letterSpacing:3,textTransform:"uppercase",color,marginBottom:6,fontWeight:700 }}>Article choisi</div>
-      <div style={{ fontFamily:"'Playfair Display',serif",fontSize:19,color:C.ink,fontWeight:600,marginBottom:20,lineHeight:1.3 }}>{item.name}</div>
-      <FL>Marque / Modèle</FL><FInput value={f.brand} onChange={v=>up("brand",v)} placeholder="Ex : Babyzen YOYO 6+"/>
-      <FL>Lien d'achat</FL><FInput value={f.url} onChange={v=>up("url",v)} placeholder="https://..."/>
-      <FL>Prix indicatif</FL><FInput value={f.price} onChange={v=>up("price",v)} placeholder="Ex : 350 €"/>
-      <FL>Notes</FL><FTextarea value={f.notes} onChange={v=>up("notes",v)} placeholder="Pourquoi ce choix, avis, où acheter..."/>
-      <div style={{ display:"flex",gap:10,marginTop:6 }}>
-        <button onClick={()=>onSave(f.brand||f.url||f.price||f.notes?f:null)} style={{ ...btn({background:C.ink,color:C.cream}), flex:1 }}>Enregistrer</button>
-        {item.chosen && <button onClick={()=>onSave(null)} style={btn({background:"rgba(196,131,106,.12)",color:C.terra,border:"1.5px solid rgba(196,131,106,.3)"})}>Effacer</button>}
+      <div style={{ fontSize:10,letterSpacing:3,textTransform:"uppercase",color,marginBottom:6,fontWeight:700 }}>Article(s) choisi(s)</div>
+      <div style={{ fontFamily:"'Playfair Display',serif",fontSize:19,color:C.ink,fontWeight:600,marginBottom:14,lineHeight:1.3 }}>{item.name}</div>
+      <button onClick={addEntry} style={{ ...btn({background:C.warm,color:C.ink,border:`1.5px dashed ${color}88`}),width:"100%",marginBottom:18,fontSize:13 }}>
+        + Ajouter une option
+      </button>
+
+      {entries.map((e, idx) => (
+        <div key={idx} style={{ marginBottom:14,paddingBottom:14,borderBottom:idx<entries.length-1?"1.5px solid #f0e8dc":"none" }}>
+          {entries.length > 1 && (
+            <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10 }}>
+              <div style={{ fontSize:11,letterSpacing:2,textTransform:"uppercase",color,fontWeight:700 }}>Option {idx+1}</div>
+              <button onClick={()=>removeEntry(idx)} style={{ fontSize:11,color:C.terra,background:"none",border:"1px solid rgba(196,131,106,.3)",borderRadius:6,cursor:"pointer",padding:"3px 10px" }}>Supprimer</button>
+            </div>
+          )}
+          <FL>Marque / Modèle</FL><FInput value={e.brand} onChange={v=>upEntry(idx,"brand",v)} placeholder="Ex : Petit Bateau, Bout'chou"/>
+          <FL>Lien d'achat</FL><FInput value={e.url} onChange={v=>upEntry(idx,"url",v)} placeholder="https://..."/>
+          <FL>Prix</FL><FInput value={e.price} onChange={v=>upEntry(idx,"price",v)} placeholder="Ex : 12 €"/>
+          <FL>Notes</FL><FTextarea value={e.notes} onChange={v=>upEntry(idx,"notes",v)} placeholder="Taille conseillée, avis..." rows={2}/>
+        </div>
+      ))}
+
+      <div style={{ display:"flex",gap:10 }}>
+        <button onClick={handleSave} style={{ ...btn({background:C.ink,color:C.cream}), flex:1 }}>Enregistrer</button>
+        {item.chosen && <button onClick={()=>onSave(null)} style={btn({background:"rgba(196,131,106,.12)",color:C.terra,border:"1.5px solid rgba(196,131,106,.3)"})}>Effacer tout</button>}
         <button onClick={onClose} style={btn({background:"white",color:"#7a6a5a",border:"1.5px solid #e8ddd0"})}>Annuler</button>
       </div>
     </Overlay>
@@ -410,9 +453,7 @@ function ReserveModal({ item, color, onSave, onClose }) {
     <Overlay onClose={onClose}>
       <div style={{ fontSize:10,letterSpacing:3,textTransform:"uppercase",color,marginBottom:6,fontWeight:700 }}>Je l'achète 🎁</div>
       <div style={{ fontFamily:"'Playfair Display',serif",fontSize:19,color:C.ink,fontWeight:600,marginBottom:6,lineHeight:1.3 }}>{item.name}</div>
-      {item.chosen?.url && safeUrl(item.chosen.url) && (
-        <a href={safeUrl(item.chosen.url)} target="_blank" rel="noopener noreferrer" style={{ display:"inline-block",fontSize:13,fontWeight:600,color,textDecoration:"none",marginBottom:16 }}>🔗 Voir l'article suggéré →</a>
-      )}
+      {(() => { const urls = (Array.isArray(item.chosen)?item.chosen:[item.chosen]).filter(Boolean).map(e=>safeUrl(e.url)).filter(Boolean); return urls.length ? urls.map((u,i)=><a key={i} href={u} target="_blank" rel="noopener noreferrer" style={{ display:"inline-block",fontSize:13,fontWeight:600,color,textDecoration:"none",marginBottom:8,marginRight:12 }}>🔗 Option {urls.length>1?i+1:""} voir l'article →</a>) : null; })()}
       <div style={{ fontSize:13,color:"#7a6a5a",lineHeight:1.6,marginBottom:18,background:"rgba(122,158,135,.07)",borderRadius:10,padding:"10px 14px" }}>
         En confirmant, <strong>tout le monde verra que cet article est pris</strong>. Plus personne ne l'achètera en double.
       </div>
@@ -433,12 +474,64 @@ function ReserveModal({ item, color, onSave, onClose }) {
   );
 }
 
+// ─── ModelsModal ──────────────────────────────────────────────────────────────
+function ModelsModal({ item, color, onSave, onClose }) {
+  const [models, setModels] = useState(() => (item.models||[]).map(m=>({...m})));
+
+  function addModel() {
+    setModels(prev => [...prev, { id:`m_${Date.now()}_${Math.random().toString(36).slice(2,6)}`, name:"", url:"", price:"", reservedBy:null }]);
+  }
+  function removeModel(idx) {
+    setModels(prev => prev.filter((_,i)=>i!==idx));
+  }
+  function upModel(idx, k, v) {
+    setModels(prev => prev.map((m,i)=>i===idx?{...m,[k]:v}:m));
+  }
+
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize:10,letterSpacing:3,textTransform:"uppercase",color,marginBottom:6,fontWeight:700 }}>Modèles / Options</div>
+      <div style={{ fontFamily:"'Playfair Display',serif",fontSize:19,color:C.ink,fontWeight:600,marginBottom:14,lineHeight:1.3 }}>{item.name}</div>
+      <div style={{ fontSize:12,color:"#7a6a5a",lineHeight:1.5,marginBottom:16 }}>
+        Listez les modèles spécifiques. Chaque modèle peut être réservé séparément par une personne différente.
+      </div>
+
+      <button onClick={addModel} style={{ ...btn({background:C.warm,color:C.ink,border:`1.5px dashed ${color}88`}),width:"100%",marginBottom:16,fontSize:13 }}>
+        + Ajouter un modèle
+      </button>
+
+      {models.length === 0 && (
+        <div style={{ textAlign:"center",color:"#b0a090",fontSize:13,padding:"16px 0" }}>Aucun modèle — cliquez sur "Ajouter" ci-dessus</div>
+      )}
+
+      {models.map((m, idx) => (
+        <div key={m.id||idx} style={{ marginBottom:14,paddingBottom:14,borderBottom:idx<models.length-1?"1.5px solid #f0e8dc":"none" }}>
+          <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10 }}>
+            <div style={{ fontSize:11,letterSpacing:2,textTransform:"uppercase",color,fontWeight:700 }}>Modèle {idx+1}{m.reservedBy?<span style={{ color:"#7a9e87",marginLeft:8 }}>· 🎁 Réservé</span>:null}</div>
+            <button onClick={()=>removeModel(idx)} style={{ fontSize:11,color:C.terra,background:"none",border:"1px solid rgba(196,131,106,.3)",borderRadius:6,cursor:"pointer",padding:"3px 10px" }}>Supprimer</button>
+          </div>
+          <FL>Nom / modèle *</FL><FInput value={m.name} onChange={v=>upModel(idx,"name",v)} placeholder="Ex : Babyzen YOYO 6+, Bout'chou x5…"/>
+          <FL>Lien produit</FL><FInput value={m.url||""} onChange={v=>upModel(idx,"url",v)} placeholder="https://..."/>
+          <FL>Prix</FL><FInput value={m.price||""} onChange={v=>upModel(idx,"price",v)} placeholder="Ex : 350 €"/>
+          <FL>Notes</FL><FTextarea value={m.notes||""} onChange={v=>upModel(idx,"notes",v)} placeholder="Taille, couleur, avis…" rows={2}/>
+        </div>
+      ))}
+
+      <div style={{ display:"flex",gap:10,marginTop:4 }}>
+        <button onClick={()=>onSave(models.filter(m=>m.name.trim()))} style={{ ...btn({background:C.ink,color:C.cream}),flex:1 }}>Enregistrer</button>
+        <button onClick={onClose} style={btn({background:"white",color:"#7a6a5a",border:"1.5px solid #e8ddd0"})}>Annuler</button>
+      </div>
+    </Overlay>
+  );
+}
+
 // ─── ItemCard ─────────────────────────────────────────────────────────────────
-function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenChosen, onDelete, onEdit, onReserve, onClearReserve }) {
-  const has = item.chosen && (item.chosen.brand||item.chosen.url||item.chosen.price||item.chosen.notes);
+function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenModels, onDelete, onEdit, onReserve, onClearReserve, onReserveModel, onClearModelReserve }) {
+  const models = item.models||[];
+  const hasModels = models.length > 0;
   const res = item.reservedBy;
   const canReserve = isContributor && !res && !item.checked;
-  const borderColor = res ? "rgba(122,158,135,.35)" : has ? color+"55" : "transparent";
+  const borderColor = res ? "rgba(122,158,135,.35)" : hasModels ? color+"55" : "transparent";
   const bgColor = item.checked ? "#f0e8dc" : res ? "rgba(122,158,135,.04)" : "white";
 
   return (
@@ -458,7 +551,7 @@ function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenChosen,
         </div>
         <div style={{ display:"flex",gap:5,flexShrink:0,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end" }}>
           {isOwner && item.custom && <button onClick={onEdit} style={{ width:28,height:28,borderRadius:7,border:"1.5px solid #e8ddd0",background:"transparent",color:"#9a8a7a",cursor:"pointer",fontSize:13,display:"flex",alignItems:"center",justifyContent:"center" }}>✏️</button>}
-          {isOwner && <button onClick={onOpenChosen} style={{ width:28,height:28,borderRadius:7,border:`1.5px solid ${has?color:"#e8ddd0"}`,background:has?`${color}15`:"transparent",color:has?color:"#b0a090",cursor:"pointer",fontSize:has?13:20,display:"flex",alignItems:"center",justifyContent:"center" }}>{has?"✏️":"＋"}</button>}
+          {isOwner && <button onClick={onOpenModels} style={{ width:28,height:28,borderRadius:7,border:`1.5px solid ${hasModels?color:"#e8ddd0"}`,background:hasModels?`${color}15`:"transparent",color:hasModels?color:"#b0a090",cursor:"pointer",fontSize:hasModels?13:20,display:"flex",alignItems:"center",justifyContent:"center" }}>{hasModels?"✏️":"＋"}</button>}
           {isOwner && item.custom && <button onClick={onDelete} style={{ width:28,height:28,borderRadius:7,border:"1.5px solid rgba(196,131,106,.25)",background:"rgba(196,131,106,.06)",color:C.terra,cursor:"pointer",fontSize:13,display:"flex",alignItems:"center",justifyContent:"center" }}>🗑️</button>}
           {isOwner && !item.checked && (
             <button onClick={onToggle} style={{ ...btn({background:"#7a9e87",color:"white"}), padding:"5px 14px", fontSize:12, borderRadius:8 }}>
@@ -470,7 +563,7 @@ function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenChosen,
               ↩ Annuler
             </button>
           )}
-          {canReserve && (
+          {canReserve && !hasModels && (
             <button onClick={onReserve} style={{ ...btn({background:"#7a9e87",color:"white"}), padding:"5px 14px", fontSize:12, borderRadius:8 }}>
               🎁 J'achète
             </button>
@@ -511,12 +604,43 @@ function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenChosen,
         </div>
       )}
 
-      {/* Chosen / product link */}
-      {has && (
-        <div style={{ margin:"0 13px 11px",borderRadius:10,padding:"10px 12px",borderLeft:`3px solid ${color}`,background:`${color}09` }}>
-          {item.chosen.brand&&<div style={{ fontSize:13,fontWeight:600,color:C.ink,marginBottom:2 }}>{item.chosen.brand}{item.chosen.price&&<span style={{ marginLeft:8,fontSize:12,fontWeight:700,color }}>{item.chosen.price}</span>}</div>}
-          {item.chosen.notes&&<div style={{ fontSize:12,color:"#7a6a5a",lineHeight:1.4,marginBottom:item.chosen.url?5:0 }}>{item.chosen.notes}</div>}
-          {safeUrl(item.chosen.url)&&<a href={safeUrl(item.chosen.url)} target="_blank" rel="noopener noreferrer" style={{ fontSize:12,fontWeight:600,color,textDecoration:"none" }}>🔗 Voir l'article →</a>}
+      {/* Models — individual reservable products */}
+      {(hasModels || isOwner) && (
+        <div style={{ margin:"0 13px 11px",display:"flex",flexDirection:"column",gap:5 }}>
+          {models.map((m) => {
+            const mRes = m.reservedBy;
+            const canReserveModel = isContributor && !mRes && !item.checked;
+            return (
+              <div key={m.id} style={{ borderRadius:10,padding:"10px 12px",background:mRes?"rgba(122,158,135,.07)":"rgba(0,0,0,.025)",border:mRes?"1.5px solid rgba(122,158,135,.3)":"1.5px solid #f0e8dc",display:"flex",alignItems:"center",gap:10 }}>
+                <div style={{ flex:1,minWidth:0 }}>
+                  <div style={{ fontSize:13,fontWeight:600,color:mRes?"#4a7a5a":C.ink,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap" }}>
+                    {m.name}
+                    {m.price&&<span style={{ fontSize:12,fontWeight:700,color }}>{m.price}</span>}
+                  </div>
+                  {m.notes&&<div style={{ fontSize:11,color:"#7a6a5a",marginTop:2,lineHeight:1.4 }}>{m.notes}</div>}
+                  {mRes&&<div style={{ fontSize:11,color:"#5a8a6a",marginTop:2 }}>🎁 Réservé par {mRes.name}</div>}
+                  {safeUrl(m.url)&&<a href={safeUrl(m.url)} target="_blank" rel="noopener noreferrer" style={{ fontSize:11,color,fontWeight:600,textDecoration:"none",display:"inline-block",marginTop:3 }}>🔗 Voir →</a>}
+                </div>
+                {canReserveModel && (
+                  <button onClick={()=>onReserveModel(m.id)} style={{ ...btn({background:"#7a9e87",color:"white"}),padding:"5px 12px",fontSize:11,borderRadius:7,flexShrink:0 }}>🎁 J'achète</button>
+                )}
+                {mRes && isOwner && (
+                  <button onClick={()=>onClearModelReserve(m.id)} style={{ fontSize:11,color:"#9a8a7a",background:"none",border:"1px solid #d8cdc0",borderRadius:6,cursor:"pointer",padding:"3px 9px",flexShrink:0 }}>Libérer</button>
+                )}
+                {mRes && isContributor && (
+                  <button onClick={()=>onClearModelReserve(m.id)} style={{ fontSize:11,color:C.terra,background:"none",border:"1px solid rgba(196,131,106,.3)",borderRadius:6,cursor:"pointer",padding:"3px 9px",flexShrink:0 }}>↩ Annuler</button>
+                )}
+                {mRes && !isOwner && !isContributor && (
+                  <span style={{ fontSize:11,fontWeight:700,color:"#5a8a6a",background:"rgba(122,158,135,.15)",borderRadius:8,padding:"4px 10px",whiteSpace:"nowrap",flexShrink:0 }}>🎁 Pris</span>
+                )}
+              </div>
+            );
+          })}
+          {isOwner && (
+            <button onClick={onOpenModels} style={{ display:"flex",alignItems:"center",gap:6,padding:"7px 14px",background:"transparent",border:`1.5px dashed ${color}66`,borderRadius:9,color,fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"'DM Sans',sans-serif" }}>
+              ＋ {hasModels ? "Ajouter un autre article" : "Ajouter des articles spécifiques"}
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -524,17 +648,34 @@ function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenChosen,
 }
 
 // ─── Settings Modal ───────────────────────────────────────────────────────────
-function SettingsModal({ cfg, onClose, onReset }) {
+function SettingsModal({ cfg, onClose, onReset, onUpdateKey }) {
   const [familyKey, setFamilyKey] = useState("");
   const [showFamilyKey, setShowFamilyKey] = useState(false);
   const [copiedReader, setCopiedReader] = useState(false);
   const [copiedFamily, setCopiedFamily] = useState(false);
   const [copiedCoparent, setCopiedCoparent] = useState(false);
+  const [newKey, setNewKey] = useState("");
+  const [showNewKey, setShowNewKey] = useState(false);
+  const [newKeyLoading, setNewKeyLoading] = useState(false);
+  const [newKeyErr, setNewKeyErr] = useState("");
+
+  async function handleNewKey() {
+    if (!newKey.trim()) return;
+    setNewKeyLoading(true); setNewKeyErr("");
+    try {
+      await apiRead(cfg.binId, newKey.trim());
+      onUpdateKey(newKey.trim());
+      setNewKey("");
+    } catch {
+      setNewKeyErr("Clé invalide ou introuvable. Vérifiez sur jsonbin.io → API Keys.");
+    }
+    setNewKeyLoading(false);
+  }
 
   const base = window.location.origin + window.location.pathname;
   const readerUrl    = `${base}?binId=${cfg.binId}`;
-  const familyUrl    = familyKey.trim() ? `${base}?binId=${cfg.binId}&ck=${familyKey.trim()}` : "";
-  const coparentUrl  = cfg.apiKey ? `${base}?binId=${cfg.binId}&ck=${cfg.apiKey}&mode=owner` : "";
+  const familyUrl    = familyKey.trim() ? `${base}?binId=${cfg.binId}&ck=${encodeURIComponent(familyKey.trim())}` : "";
+  const coparentUrl  = cfg.apiKey ? `${base}?binId=${cfg.binId}&ck=${encodeURIComponent(cfg.apiKey)}&mode=owner` : "";
 
   function copyText(text, setCopied) {
     navigator.clipboard?.writeText(text).then(()=>{ setCopied(true); setTimeout(()=>setCopied(false), 2500); }).catch(()=>{
@@ -594,12 +735,32 @@ function SettingsModal({ cfg, onClose, onReset }) {
       )}
 
       {/* Role */}
-      <div style={{ background:C.warm,borderRadius:12,padding:"12px 16px",marginBottom:16 }}>
+      <div style={{ background:C.warm,borderRadius:12,padding:"12px 16px",marginBottom:12 }}>
         <div style={{ fontSize:11,letterSpacing:2,textTransform:"uppercase",color:"#9a8a7a",marginBottom:4,fontWeight:700 }}>Votre rôle</div>
         <div style={{ fontSize:14,color:C.ink }}>
           {cfg.mode==="owner"?"👶 Propriétaire (gestion complète)":cfg.mode==="contributor"?"🎁 Famille (peut réserver)":"👀 Lecteur (lecture seule)"}
         </div>
       </div>
+
+      {/* Update key — owner only */}
+      {cfg.mode === "owner" && onUpdateKey && (
+        <div style={{ background:"rgba(196,131,106,.06)",border:"1.5px solid rgba(196,131,106,.2)",borderRadius:12,padding:"14px 16px",marginBottom:16 }}>
+          <div style={{ fontSize:11,letterSpacing:2,textTransform:"uppercase",color:C.terra,marginBottom:4,fontWeight:700 }}>🔑 Mettre à jour la Master Key</div>
+          <div style={{ fontSize:12,color:"#7a6a5a",lineHeight:1.5,marginBottom:10 }}>
+            Si votre clé JSONbin a changé (ou a été regénérée), entrez la nouvelle ici. Vos données ne seront pas perdues.
+          </div>
+          <div style={{ position:"relative" }}>
+            <FInput value={newKey} onChange={setNewKey} placeholder="$2b$10$..." type={showNewKey?"text":"password"}/>
+            <button onClick={()=>setShowNewKey(v=>!v)} style={{ position:"absolute",right:10,top:10,background:"none",border:"none",cursor:"pointer",color:"#9a8a7a",fontSize:15 }}>{showNewKey?"🙈":"👁️"}</button>
+          </div>
+          {newKeyErr && <div style={{ color:C.terra,fontSize:12,marginBottom:8 }}>⚠ {newKeyErr}</div>}
+          {newKey.trim() && (
+            <button onClick={handleNewKey} disabled={newKeyLoading} style={{ ...btn({background:C.terra,color:"white"}),width:"100%",padding:"9px 0",fontSize:13 }}>
+              {newKeyLoading?"Validation en cours…":"✓ Valider la nouvelle clé"}
+            </button>
+          )}
+        </div>
+      )}
 
       <div style={{ display:"flex",gap:10 }}>
         <button onClick={onClose} style={{ ...btn({background:C.ink,color:C.cream}), flex:1 }}>Fermer</button>
@@ -625,6 +786,7 @@ export default function App() {
   const [toast, setToast]       = useState({ msg:"", type:"ok" });
   const [syncState, setSyncState] = useState("idle");
   const [showSettings, setShowSettings] = useState(false);
+  const [keyInvalid, setKeyInvalid] = useState(false);
   const saveTimer = useRef(null);
   const isOwner       = cfg?.mode === "owner";
   const isContributor = cfg?.mode === "contributor";
@@ -664,7 +826,16 @@ export default function App() {
       showToast("✓ Synchronisé", "sync");
     } catch(e) {
       setSyncState("error");
-      showToast("⚠ " + (e.message||"Erreur de sauvegarde"), "err", 6000);
+      const raw = e.message || "";
+      let parsed = {};
+      try { parsed = JSON.parse(raw); } catch {}
+      const isAuthErr = (parsed.message || raw).toLowerCase().includes("invalid") || raw.includes("401") || raw.includes("403");
+      if (isAuthErr) {
+        setKeyInvalid(true);
+        showToast("⚠ Clé JSONbin invalide — ouvrez ⚙️ pour la mettre à jour", "err", 8000);
+      } else {
+        showToast("⚠ " + (parsed.message || raw || "Erreur de sauvegarde"), "err", 6000);
+      }
     }
   }, [cfg]);
 
@@ -688,6 +859,13 @@ export default function App() {
       return next;
     });
   }
+  function updateModel(secId, itemId, modelId, patch) {
+    setSections(prev => {
+      const next = prev.map(s => s.id!==secId?s:{ ...s, items:s.items.map(i=>i.id!==itemId?i:{ ...i, models:(i.models||[]).map(m=>m.id!==modelId?m:{...m,...patch}) }) });
+      doSave(next);
+      return next;
+    });
+  }
   function addItem(secId, name, note, url) {
     const chosen = url ? { brand:"", url, price:"", notes:"" } : null;
     const ni = { id:`c_${uid()}`,name,note,tags:[],checked:false,chosen,reservedBy:null,custom:true };
@@ -702,6 +880,15 @@ export default function App() {
     const ns = { id:`sec_${uid()}`,priority:sections.length+1,label:"Personnalisé",color:PRIO_COLORS[6],title,tip:null,items:[],defaultItems:[] };
     update(secs => [...secs,ns]);
     setModal(null); showToast("✓ Section créée");
+  }
+
+  function handleUpdateKey(newApiKey) {
+    const newCfg = { ...cfg, apiKey: newApiKey };
+    saveCfg(newCfg);
+    setCfg(newCfg);
+    setKeyInvalid(false);
+    setShowSettings(false);
+    showToast("✓ Clé mise à jour — reconnexion en cours…", "sync", 3000);
   }
 
   if (!cfg) return <SetupScreen onDone={c => { saveCfg(c); setCfg(c); }}/>;
@@ -771,6 +958,18 @@ export default function App() {
           </div>
         </div>
 
+        {/* Key invalid banner */}
+        {keyInvalid && (
+          <div style={{ background:"rgba(196,131,106,.15)",borderBottom:"1.5px solid rgba(196,131,106,.4)",padding:"14px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap" }}>
+            <div style={{ fontSize:13,color:C.terra,lineHeight:1.5 }}>
+              <strong>Clé JSONbin invalide.</strong> Allez sur <strong>jsonbin.io</strong> → API Keys, copiez votre Master Key actuelle, puis cliquez sur le bouton.
+            </div>
+            <button onClick={()=>setShowSettings(true)} style={{ ...btn({background:C.terra,color:"white"}),whiteSpace:"nowrap",fontSize:12,padding:"8px 16px",flexShrink:0 }}>
+              Mettre à jour la clé ⚙️
+            </button>
+          </div>
+        )}
+
         <div style={{ maxWidth:700,margin:"0 auto",padding:"0 18px" }}>
 
           {/* Contributor welcome banner */}
@@ -833,11 +1032,13 @@ export default function App() {
                     key={it.id} item={it} color={sec.color}
                     isOwner={isOwner} isContributor={isContributor}
                     onToggle={()=>updateItem(sec.id,it.id,{checked:!it.checked})}
-                    onOpenChosen={()=>setModal({type:"chosen",secId:sec.id,itemId:it.id})}
                     onDelete={()=>deleteItem(sec.id,it.id)}
                     onEdit={()=>setModal({type:"edit",secId:sec.id,itemId:it.id})}
                     onReserve={()=>setModal({type:"reserve",secId:sec.id,itemId:it.id})}
                     onClearReserve={()=>updateItemNow(sec.id,it.id,{reservedBy:null})}
+                    onOpenModels={()=>setModal({type:"models",secId:sec.id,itemId:it.id})}
+                    onReserveModel={(modelId)=>setModal({type:"reserveModel",secId:sec.id,itemId:it.id,modelId})}
+                    onClearModelReserve={(modelId)=>updateModel(sec.id,it.id,modelId,{reservedBy:null})}
                   />
                 ))}
               </div>
@@ -877,12 +1078,13 @@ export default function App() {
       </div>
 
       {/* ── Modals ── */}
-      {modal?.type==="chosen"&&mItem&&<ChosenModal item={mItem} color={mSec.color} onSave={c=>{updateItem(modal.secId,modal.itemId,{chosen:c});setModal(null);}} onClose={()=>setModal(null)}/>}
       {modal?.type==="addItem"&&mSec&&<AddItemModal sectionTitle={mSec.title} onAdd={(n,no,u)=>addItem(modal.secId,n,no,u)} onClose={()=>setModal(null)}/>}
       {modal?.type==="edit"&&mItem&&<EditItemModal item={mItem} onSave={(n,no)=>{updateItem(modal.secId,modal.itemId,{name:n,note:no});setModal(null);showToast("✓ Modifié");}} onClose={()=>setModal(null)}/>}
       {modal?.type==="addSection"&&<AddSectionModal onAdd={addSection} onClose={()=>setModal(null)}/>}
       {modal?.type==="reserve"&&mItem&&<ReserveModal item={mItem} color={mSec.color} onSave={r=>{updateItemNow(modal.secId,modal.itemId,{reservedBy:r});setModal(null);showToast("🎁 Acheté ! Merci !");}} onClose={()=>setModal(null)}/>}
-      {showSettings&&<SettingsModal cfg={cfg} onClose={()=>setShowSettings(false)} onReset={()=>{localStorage.removeItem(LOCAL_CFG);setCfg(null);setShowSettings(false);}}/>}
+      {modal?.type==="models"&&mItem&&<ModelsModal item={mItem} color={mSec.color} onSave={models=>{updateItem(modal.secId,modal.itemId,{models});setModal(null);showToast("✓ Modèles enregistrés");}} onClose={()=>setModal(null)}/>}
+      {modal?.type==="reserveModel"&&mItem&&(()=>{ const m=(mItem.models||[]).find(x=>x.id===modal.modelId); return m?<ReserveModal item={{...mItem,name:m.name,chosen:m.url?[{brand:"",url:m.url,price:"",notes:""}]:null}} color={mSec.color} onSave={r=>{updateModel(modal.secId,modal.itemId,modal.modelId,{reservedBy:r});setModal(null);showToast("🎁 Acheté ! Merci !");}} onClose={()=>setModal(null)}/>:null; })()}
+      {showSettings&&<SettingsModal cfg={cfg} onClose={()=>setShowSettings(false)} onReset={()=>{localStorage.removeItem(LOCAL_CFG);setCfg(null);setShowSettings(false);}} onUpdateKey={handleUpdateKey}/>}
 
       <Toast msg={toast.msg} type={toast.type}/>
     </>
