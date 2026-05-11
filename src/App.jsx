@@ -535,7 +535,7 @@ function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenModels,
   const bgColor = item.checked ? "#f0e8dc" : res ? "rgba(122,158,135,.04)" : "white";
 
   return (
-    <div style={{ background:bgColor,borderRadius:14,border:`1.5px solid ${borderColor}`,boxShadow:res?"0 2px 12px rgba(122,158,135,.12)":has?`0 2px 14px ${color}18`:"none",overflow:"hidden",opacity:item.checked?.6:1,transition:"all .2s ease" }}>
+    <div style={{ background:bgColor,borderRadius:14,border:`1.5px solid ${borderColor}`,boxShadow:res?"0 2px 12px rgba(122,158,135,.12)":hasModels?`0 2px 14px ${color}18`:"none",overflow:"hidden",opacity:item.checked?.6:1,transition:"all .2s ease" }}>
       <div style={{ display:"flex",alignItems:"flex-start",gap:12,padding:"13px 13px 11px" }}>
         <div
           onClick={isOwner?onToggle:undefined}
