@@ -12,6 +12,43 @@ const TAG_META = {
   custom:  { bg:"rgba(138,122,154,.15)", color:"#6a5a7a", label:"ajouté" },
 };
 
+const SECTION_SUGGESTIONS = {
+  sommeil: [
+    { name:"Baby monitor vidéo", note:"Surveillance à distance via appli. Modèle WiFi avec vision nocturne." },
+    { name:"Tour de lit respirant (mesh)", note:"Sécurité : choisir un modèle en mesh aéré, éviter les rembourrés." },
+    { name:"Sac de couchage nomade", note:"Pour les nuits chez les grands-parents." },
+    { name:"Veilleuse nomade rechargeable", note:"Portable, pour les nuits et les voyages. Lumière chaude douce." },
+  ],
+  alim: [
+    { name:"Stérilisateur vapeur électrique", note:"Stérilise biberons et tétines en quelques minutes." },
+    { name:"Goupillon nettoyage biberons", note:"Brosse longue + petite pour tétines. Indispensable au quotidien." },
+    { name:"Chauffe-biberon portable (voiture)", note:"Pour chauffer les biberons lors des déplacements." },
+    { name:"Couverts bébé ergonomiques", note:"Pour la diversification alimentaire (dès 4-6 mois)." },
+  ],
+  hygiene: [
+    { name:"Coton hydrophile biologique (×200)", note:"Pour le visage, le change et le bain. Le plus doux pour la peau." },
+    { name:"Brosse à cheveux douce nouveau-né", note:"Soies naturelles extra-douces pour les premiers cheveux." },
+    { name:"Huile de massage bébé", note:"Après le bain. Apaise bébé et renforce le lien parent-enfant." },
+    { name:"Filet de bain sécurité", note:"Maintient bébé dans la baignoire pour un bain en sécurité." },
+  ],
+  mobilite: [
+    { name:"Miroir de surveillance voiture", note:"Se fixe au siège arrière, visible dans le rétroviseur conducteur." },
+    { name:"Organiseur poussette", note:"Fixé sur la poignée : clés, téléphone, bouteille à portée de main." },
+    { name:"Anneau de dentition", note:"Dès 3-4 mois. Silicone alimentaire ou latex naturel." },
+    { name:"Couverture nomade légère", note:"Pour la poussette ou le portage par temps frais." },
+  ],
+  creche: [
+    { name:"Pochette linge sale imperméable", note:"Pour rapporter les vêtements souillés de la crèche." },
+    { name:"Pochette documents médicaux", note:"Carnet de santé, ordonnances, vaccins — toujours à portée." },
+  ],
+  eveil: [
+    { name:"Livres en tissu sensoriels", note:"Premiers livres lavables en machine. Développe le toucher." },
+    { name:"Portique d'éveil musical", note:"Pour les 0-6 mois. Stimule la vision et la coordination motrice." },
+    { name:"Boîte à musique peluche", note:"Mélodie apaisante déclenchée par bébé. Aide à l'endormissement." },
+    { name:"Tapis puzzle en mousse EVA", note:"Dès 6 mois. Protège lors des premiers pas et des chutes." },
+  ],
+};
+
 // ─── Données par défaut ───────────────────────────────────────────────────────
 const DEFAULT_SECTIONS = [
   { id:"sommeil", priority:1, label:"Indispensable", color:PRIO_COLORS[0], title:"Sommeil & sécurité",
@@ -377,12 +414,29 @@ function TagSelector({ selected, onChange }) {
   );
 }
 
-function AddItemModal({ sectionTitle, onAdd, onClose }) {
+function AddItemModal({ sectionId, sectionTitle, onAdd, onClose }) {
   const [name,setName]=useState(""); const [note,setNote]=useState(""); const [url,setUrl]=useState(""); const [tags,setTags]=useState([]);
+  const suggestions = SECTION_SUGGESTIONS[sectionId] || [];
   return (
     <Overlay onClose={onClose}>
       <div style={{ fontSize:10,letterSpacing:3,textTransform:"uppercase",color:"#8a7a9a",marginBottom:6,fontWeight:700 }}>Ajouter un article</div>
-      <div style={{ fontFamily:"'Playfair Display',serif",fontSize:19,color:C.ink,fontWeight:600,marginBottom:20 }}>{sectionTitle}</div>
+      <div style={{ fontFamily:"'Playfair Display',serif",fontSize:19,color:C.ink,fontWeight:600,marginBottom:16 }}>{sectionTitle}</div>
+      {suggestions.length > 0 && (
+        <div style={{ marginBottom:18 }}>
+          <div style={{ fontSize:10,letterSpacing:1.5,textTransform:"uppercase",color:"#9a8a7a",fontWeight:700,marginBottom:8 }}>✨ Indispensables à ajouter</div>
+          <div style={{ display:"flex",flexWrap:"wrap",gap:6 }}>
+            {suggestions.map((s,i) => {
+              const active = name === s.name;
+              return (
+                <button key={i} onClick={()=>{ setName(s.name); setNote(s.note); }} type="button"
+                  style={{ fontSize:12,padding:"5px 13px",borderRadius:20,border:`1.5px solid ${active?"#c4836a":"#e8ddd0"}`,background:active?"rgba(196,131,106,.1)":"white",color:active?"#c4836a":"#6a5a7a",fontWeight:active?700:500,cursor:"pointer",fontFamily:"'DM Sans',sans-serif",transition:"all .15s" }}>
+                  {active?"✓ ":""}{s.name}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
       <FL>Nom *</FL><FInput value={name} onChange={setName} placeholder="Ex : Anneau de dentition"/>
       <FL>Note / description</FL><FTextarea value={note} onChange={setNote} placeholder="Quantité, pourquoi, marque..." rows={2}/>
       <FL>Lien produit (optionnel)</FL><FInput value={url} onChange={setUrl} placeholder="https://..."/>
@@ -934,6 +988,13 @@ export default function App() {
     doSave(next);
     showToast("Section supprimée");
   }
+  function restoreItem(secId, itemId) {
+    clearTimeout(saveTimer.current);
+    const next = sections.map(s => s.id!==secId?s:{ ...s,items:s.items.map(i=>i.id!==itemId?i:{...i,hidden:false}) });
+    setSections(next);
+    doSave(next);
+    showToast("✓ Article restauré");
+  }
 
   function handleUpdateKey(newApiKey) {
     const newCfg = { ...cfg, apiKey: newApiKey };
@@ -1120,6 +1181,24 @@ export default function App() {
                 ))}
               </div>
 
+              {isOwner && sec.items.filter(it=>it.hidden).length > 0 && (
+                <details style={{ marginTop:8 }}>
+                  <summary style={{ fontSize:12,color:"#9a8a7a",cursor:"pointer",padding:"6px 2px",userSelect:"none",listStyle:"none",display:"flex",alignItems:"center",gap:6 }}>
+                    <span style={{ fontSize:13 }}>↩</span>
+                    {sec.items.filter(it=>it.hidden).length} article(s) supprimé(s) — cliquer pour restaurer
+                  </summary>
+                  <div style={{ marginTop:8,display:"flex",flexDirection:"column",gap:5 }}>
+                    {sec.items.filter(it=>it.hidden).map(it=>(
+                      <div key={it.id} style={{ display:"flex",alignItems:"center",gap:10,padding:"8px 13px",background:"white",borderRadius:10,border:"1.5px dashed #e8ddd0",opacity:.75 }}>
+                        <div style={{ flex:1,fontSize:13,color:"#9a8a7a",textDecoration:"line-through" }}>{it.name}</div>
+                        <button onClick={()=>restoreItem(sec.id,it.id)} style={{ ...btn({background:"rgba(122,158,135,.1)",color:"#5a8a6a",border:"1.5px solid rgba(122,158,135,.3)"}),padding:"5px 14px",fontSize:12 }}>
+                          ↩ Restaurer
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
               {isOwner && (
                 <button onClick={()=>setModal({type:"addItem",secId:sec.id})}
                   style={{ display:"flex",alignItems:"center",gap:8,marginTop:10,padding:"9px 14px",background:"transparent",border:`1.5px dashed ${sec.color}55`,borderRadius:10,color:sec.color,fontSize:13,fontWeight:600,cursor:"pointer",width:"100%",fontFamily:"'DM Sans',sans-serif" }}>
@@ -1155,7 +1234,7 @@ export default function App() {
       </div>
 
       {/* ── Modals ── */}
-      {modal?.type==="addItem"&&mSec&&<AddItemModal sectionTitle={mSec.title} onAdd={(n,no,u,tg)=>addItem(modal.secId,n,no,u,tg)} onClose={()=>setModal(null)}/>}
+      {modal?.type==="addItem"&&mSec&&<AddItemModal sectionId={modal.secId} sectionTitle={mSec.title} onAdd={(n,no,u,tg)=>addItem(modal.secId,n,no,u,tg)} onClose={()=>setModal(null)}/>}
       {modal?.type==="edit"&&mItem&&<EditItemModal item={mItem} onSave={(n,no,tg)=>{updateItem(modal.secId,modal.itemId,{name:n,note:no,tags:tg});setModal(null);showToast("✓ Modifié");}} onClose={()=>setModal(null)}/>}
       {modal?.type==="addSection"&&<AddSectionModal onAdd={addSection} onClose={()=>setModal(null)}/>}
       {modal?.type==="reserve"&&mItem&&<ReserveModal item={mItem} color={mSec.color} onSave={r=>{updateItemNow(modal.secId,modal.itemId,{reservedBy:r});setModal(null);showToast("🎁 Acheté ! Merci !");}} onClose={()=>setModal(null)}/>}
