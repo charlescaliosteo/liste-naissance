@@ -137,7 +137,7 @@ function mergeData(remote) {
       items: def.defaultItems.map(di => ({
         ...di, custom:false,
         checked:    itemsMap[di.id]?.checked    || false,
-        chosen:     itemsMap[di.id]?.chosen     || null,
+        chosen:     null,
         reservedBy: itemsMap[di.id]?.reservedBy || null,
         hidden:     itemsMap[di.id]?.hidden     || false,
         models: (() => {
@@ -529,7 +529,7 @@ function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenModels,
             {item.name}{(item.tags||[]).map(t=><Tag key={t} type={t}/>)}{item.custom&&<Tag type="custom"/>}
           </div>
           {item.note&&<div style={{ fontSize:12,color:"#9a8a7a",fontWeight:300,lineHeight:1.5 }}>{item.note}</div>}
-          {(()=>{ const urls=(Array.isArray(item.chosen)?item.chosen:[item.chosen]).filter(Boolean).map(e=>safeUrl(e.url)).filter(Boolean); return urls.length?urls.map((u,i)=><a key={i} href={u} target="_blank" rel="noopener noreferrer" style={{ fontSize:11,color,fontWeight:600,textDecoration:"none",display:"inline-block",marginTop:3,marginRight:8 }}>🔗 {urls.length>1?`Option ${i+1} · `:""}Voir le produit →</a>):null; })()}
+          {!hasModels&&(()=>{ const urls=(Array.isArray(item.chosen)?item.chosen:[item.chosen]).filter(Boolean).map(e=>safeUrl(e.url)).filter(Boolean); return urls.length?urls.map((u,i)=><a key={i} href={u} target="_blank" rel="noopener noreferrer" style={{ fontSize:11,color,fontWeight:600,textDecoration:"none",display:"inline-block",marginTop:3,marginRight:8 }}>🔗 {urls.length>1?`Option ${i+1} · `:""}Voir le produit →</a>):null; })()}
         </div>
         <div style={{ display:"flex",gap:5,flexShrink:0,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end" }}>
           {isOwner && item.custom && <button onClick={onEdit} style={{ width:28,height:28,borderRadius:7,border:"1.5px solid #e8ddd0",background:"transparent",color:"#9a8a7a",cursor:"pointer",fontSize:13,display:"flex",alignItems:"center",justifyContent:"center" }}>✏️</button>}
