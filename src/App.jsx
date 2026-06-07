@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+﻿import { useState, useEffect, useRef, useCallback } from "react";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const JSONBIN_API = "https://api.jsonbin.io/v3/b";
@@ -98,6 +98,23 @@ function loadCfg() {
 
 function safeUrl(u) { return u && /^https?:\/\//i.test(u.trim()) ? u.trim() : null; }
 
+// ─── Cache local (survit au rechargement) ────────────────────────────────────
+// Principe : on écrit dans localStorage AVANT l'appel réseau.
+// Au rechargement, on compare l'horodatage du cache avec updatedAt de JSONbin.
+// Le plus récent gagne — donc même si JSONbin n'a pas reçu la sauvegarde, le cache prévaut.
+const LOCAL_CACHE = "naissance-cache-v1";
+function saveLocalCache(remote) {
+  try { localStorage.setItem(LOCAL_CACHE, JSON.stringify({ t: Date.now(), remote })); } catch {}
+}
+function loadLocalCache() {
+  try { return JSON.parse(localStorage.getItem(LOCAL_CACHE)); } catch { return null; }
+}
+// Nettoyage des anciennes clés de l'ancienne mécanique de suppressions en attente
+function clearLegacyDels() {
+  try { localStorage.removeItem("naissance-del-v1"); } catch {}
+  try { localStorage.removeItem("naissance-mdel-v1"); } catch {}
+}
+
 function buildInitialData() {
   return {
     version: 1,
@@ -122,10 +139,13 @@ function mergeData(remote) {
         checked:    itemsMap[di.id]?.checked    || false,
         chosen:     itemsMap[di.id]?.chosen     || null,
         reservedBy: itemsMap[di.id]?.reservedBy || null,
+        hidden:     itemsMap[di.id]?.hidden     || false,
         models: (() => {
-          const saved = itemsMap[di.id]?.models||[];
-          if (saved.length) return saved;
-          const c = itemsMap[di.id]?.chosen;
+          const remItem = itemsMap[di.id];
+          // Si models est explicitement un tableau (même vide), on le respecte — ne pas retomber sur chosen
+          if (Array.isArray(remItem?.models)) return remItem.models;
+          // Ancien format : models absent, on lit chosen
+          const c = remItem?.chosen;
           if (!c) return [];
           const arr = Array.isArray(c)?c:[c];
           return arr.filter(e=>e.brand||e.url||e.price||e.notes).map((e,i)=>({ id:`mg_${di.id}_${i}`, name:e.brand||`Option ${i+1}`, url:e.url||"", price:e.price||"", notes:e.notes||"", reservedBy:null }));
@@ -147,7 +167,7 @@ function sectionsToRemote(sections) {
     updatedAt: new Date().toISOString(),
     sections: sections.filter(s => defaultIds.has(s.id)).map(s => ({
       id: s.id,
-      items: s.items.filter(i => !i.custom).map(i => ({ id:i.id, checked:i.checked, chosen:i.chosen, reservedBy:i.reservedBy||null, models:i.models||[] })),
+      items: s.items.filter(i => !i.custom).map(i => ({ id:i.id, checked:i.checked, chosen:i.chosen, reservedBy:i.reservedBy||null, models:i.models||[], hidden:i.hidden||false })),
       customItems: s.items.filter(i => i.custom).map(i => ({ id:i.id, name:i.name, note:i.note, tags:i.tags||[], checked:i.checked, chosen:i.chosen, reservedBy:i.reservedBy||null, models:i.models||[], custom:true })),
     })),
     customSections: sections.filter(s => !defaultIds.has(s.id)).map(s => ({
@@ -178,10 +198,12 @@ async function apiRead(binId, apiKey) {
 }
 
 async function apiUpdate(binId, apiKey, data) {
+  const body = JSON.stringify(data);
   const res = await fetch(`${JSONBIN_API}/${binId}`, {
     method:"PUT",
     headers:{ "Content-Type":"application/json", "X-Master-Key":apiKey },
-    body: JSON.stringify(data),
+    body,
+    keepalive: true,
   });
   if (!res.ok) { const t = await res.text(); throw new Error(t); }
   return res.json();
@@ -343,63 +365,20 @@ function SetupScreen({ onDone }) {
 }
 
 // ─── Modals ───────────────────────────────────────────────────────────────────
-function ChosenModal({ item, color, onSave, onClose }) {
-  const init = () => {
-    const c = item.chosen;
-    if (!c) return [{ brand:"", url:"", price:"", notes:"" }];
-    if (Array.isArray(c)) return c.length ? c.map(e=>({...e})) : [{ brand:"", url:"", price:"", notes:"" }];
-    return [{ ...c }];
-  };
-  const [entries, setEntries] = useState(init);
-
-  function upEntry(idx, k, v) {
-    setEntries(prev => prev.map((e, i) => i === idx ? { ...e, [k]: v } : e));
-  }
-  function addEntry() {
-    setEntries(prev => [...prev, { brand:"", url:"", price:"", notes:"" }]);
-  }
-  function removeEntry(idx) {
-    setEntries(prev => prev.length > 1 ? prev.filter((_, i) => i !== idx) : [{ brand:"", url:"", price:"", notes:"" }]);
-  }
-  function handleSave() {
-    const cleaned = entries.filter(e => e.brand||e.url||e.price||e.notes);
-    onSave(cleaned.length ? cleaned : null);
-  }
-
+const SELECTABLE_TAGS = ["logement","creche","urgent"];
+function TagSelector({ selected, onChange }) {
+  function toggle(t) { onChange(selected.includes(t)?selected.filter(x=>x!==t):[...selected,t]); }
   return (
-    <Overlay onClose={onClose}>
-      <div style={{ fontSize:10,letterSpacing:3,textTransform:"uppercase",color,marginBottom:6,fontWeight:700 }}>Article(s) choisi(s)</div>
-      <div style={{ fontFamily:"'Playfair Display',serif",fontSize:19,color:C.ink,fontWeight:600,marginBottom:14,lineHeight:1.3 }}>{item.name}</div>
-      <button onClick={addEntry} style={{ ...btn({background:C.warm,color:C.ink,border:`1.5px dashed ${color}88`}),width:"100%",marginBottom:18,fontSize:13 }}>
-        + Ajouter une option
-      </button>
-
-      {entries.map((e, idx) => (
-        <div key={idx} style={{ marginBottom:14,paddingBottom:14,borderBottom:idx<entries.length-1?"1.5px solid #f0e8dc":"none" }}>
-          {entries.length > 1 && (
-            <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10 }}>
-              <div style={{ fontSize:11,letterSpacing:2,textTransform:"uppercase",color,fontWeight:700 }}>Option {idx+1}</div>
-              <button onClick={()=>removeEntry(idx)} style={{ fontSize:11,color:C.terra,background:"none",border:"1px solid rgba(196,131,106,.3)",borderRadius:6,cursor:"pointer",padding:"3px 10px" }}>Supprimer</button>
-            </div>
-          )}
-          <FL>Marque / Modèle</FL><FInput value={e.brand} onChange={v=>upEntry(idx,"brand",v)} placeholder="Ex : Petit Bateau, Bout'chou"/>
-          <FL>Lien d'achat</FL><FInput value={e.url} onChange={v=>upEntry(idx,"url",v)} placeholder="https://..."/>
-          <FL>Prix</FL><FInput value={e.price} onChange={v=>upEntry(idx,"price",v)} placeholder="Ex : 12 €"/>
-          <FL>Notes</FL><FTextarea value={e.notes} onChange={v=>upEntry(idx,"notes",v)} placeholder="Taille conseillée, avis..." rows={2}/>
-        </div>
-      ))}
-
-      <div style={{ display:"flex",gap:10 }}>
-        <button onClick={handleSave} style={{ ...btn({background:C.ink,color:C.cream}), flex:1 }}>Enregistrer</button>
-        {item.chosen && <button onClick={()=>onSave(null)} style={btn({background:"rgba(196,131,106,.12)",color:C.terra,border:"1.5px solid rgba(196,131,106,.3)"})}>Effacer tout</button>}
-        <button onClick={onClose} style={btn({background:"white",color:"#7a6a5a",border:"1.5px solid #e8ddd0"})}>Annuler</button>
-      </div>
-    </Overlay>
+    <div style={{ display:"flex",gap:6,flexWrap:"wrap",marginBottom:13 }}>
+      {SELECTABLE_TAGS.map(t=>{ const m=TAG_META[t]; const on=selected.includes(t); return (
+        <button key={t} onClick={()=>toggle(t)} type="button" style={{ fontSize:11,padding:"4px 12px",borderRadius:10,border:`1.5px solid ${on?m.color:"#e8ddd0"}`,background:on?m.bg:"white",color:on?m.color:"#9a8a7a",fontWeight:700,letterSpacing:.5,textTransform:"uppercase",cursor:"pointer",fontFamily:"'DM Sans',sans-serif",transition:"all .15s" }}>{m.label}</button>
+      );})}
+    </div>
   );
 }
 
 function AddItemModal({ sectionTitle, onAdd, onClose }) {
-  const [name,setName]=useState(""); const [note,setNote]=useState(""); const [url,setUrl]=useState("");
+  const [name,setName]=useState(""); const [note,setNote]=useState(""); const [url,setUrl]=useState(""); const [tags,setTags]=useState([]);
   return (
     <Overlay onClose={onClose}>
       <div style={{ fontSize:10,letterSpacing:3,textTransform:"uppercase",color:"#8a7a9a",marginBottom:6,fontWeight:700 }}>Ajouter un article</div>
@@ -407,8 +386,9 @@ function AddItemModal({ sectionTitle, onAdd, onClose }) {
       <FL>Nom *</FL><FInput value={name} onChange={setName} placeholder="Ex : Anneau de dentition"/>
       <FL>Note / description</FL><FTextarea value={note} onChange={setNote} placeholder="Quantité, pourquoi, marque..." rows={2}/>
       <FL>Lien produit (optionnel)</FL><FInput value={url} onChange={setUrl} placeholder="https://..."/>
+      <FL>Tags (optionnel)</FL><TagSelector selected={tags} onChange={setTags}/>
       <div style={{ display:"flex",gap:10,marginTop:6 }}>
-        <button onClick={()=>{ if(name.trim()) onAdd(name.trim(),note.trim(),url.trim()); }} style={{ ...btn({background:C.ink,color:C.cream,opacity:name.trim()?1:.45}), flex:1 }}>Ajouter</button>
+        <button onClick={()=>{ if(name.trim()) onAdd(name.trim(),note.trim(),url.trim(),tags); }} style={{ ...btn({background:C.ink,color:C.cream,opacity:name.trim()?1:.45}), flex:1 }}>Ajouter</button>
         <button onClick={onClose} style={btn({background:"white",color:"#7a6a5a",border:"1.5px solid #e8ddd0"})}>Annuler</button>
       </div>
     </Overlay>
@@ -416,14 +396,15 @@ function AddItemModal({ sectionTitle, onAdd, onClose }) {
 }
 
 function EditItemModal({ item, onSave, onClose }) {
-  const [name,setName]=useState(item.name); const [note,setNote]=useState(item.note||"");
+  const [name,setName]=useState(item.name); const [note,setNote]=useState(item.note||""); const [tags,setTags]=useState((item.tags||[]).filter(t=>SELECTABLE_TAGS.includes(t)));
   return (
     <Overlay onClose={onClose}>
       <div style={{ fontSize:10,letterSpacing:3,textTransform:"uppercase",color:"#8a7a9a",marginBottom:6,fontWeight:700 }}>Modifier</div>
       <FL>Nom</FL><FInput value={name} onChange={setName} placeholder="Nom de l'article"/>
       <FL>Note</FL><FTextarea value={note} onChange={setNote} placeholder="Description..." rows={2}/>
+      <FL>Tags</FL><TagSelector selected={tags} onChange={setTags}/>
       <div style={{ display:"flex",gap:10,marginTop:6 }}>
-        <button onClick={()=>onSave(name.trim(),note.trim())} style={{ ...btn({background:C.ink,color:C.cream}), flex:1 }}>Enregistrer</button>
+        <button onClick={()=>onSave(name.trim(),note.trim(),tags)} style={{ ...btn({background:C.ink,color:C.cream}), flex:1 }}>Enregistrer</button>
         <button onClick={onClose} style={btn({background:"white",color:"#7a6a5a",border:"1.5px solid #e8ddd0"})}>Annuler</button>
       </div>
     </Overlay>
@@ -526,7 +507,7 @@ function ModelsModal({ item, color, onSave, onClose }) {
 }
 
 // ─── ItemCard ─────────────────────────────────────────────────────────────────
-function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenModels, onDelete, onEdit, onReserve, onClearReserve, onReserveModel, onClearModelReserve }) {
+function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenModels, onDelete, onEdit, onReserve, onClearReserve, onReserveModel, onClearModelReserve, onDeleteModel }) {
   const models = item.models||[];
   const hasModels = models.length > 0;
   const res = item.reservedBy;
@@ -548,11 +529,12 @@ function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenModels,
             {item.name}{(item.tags||[]).map(t=><Tag key={t} type={t}/>)}{item.custom&&<Tag type="custom"/>}
           </div>
           {item.note&&<div style={{ fontSize:12,color:"#9a8a7a",fontWeight:300,lineHeight:1.5 }}>{item.note}</div>}
+          {(()=>{ const urls=(Array.isArray(item.chosen)?item.chosen:[item.chosen]).filter(Boolean).map(e=>safeUrl(e.url)).filter(Boolean); return urls.length?urls.map((u,i)=><a key={i} href={u} target="_blank" rel="noopener noreferrer" style={{ fontSize:11,color,fontWeight:600,textDecoration:"none",display:"inline-block",marginTop:3,marginRight:8 }}>🔗 {urls.length>1?`Option ${i+1} · `:""}Voir le produit →</a>):null; })()}
         </div>
         <div style={{ display:"flex",gap:5,flexShrink:0,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end" }}>
           {isOwner && item.custom && <button onClick={onEdit} style={{ width:28,height:28,borderRadius:7,border:"1.5px solid #e8ddd0",background:"transparent",color:"#9a8a7a",cursor:"pointer",fontSize:13,display:"flex",alignItems:"center",justifyContent:"center" }}>✏️</button>}
           {isOwner && <button onClick={onOpenModels} style={{ width:28,height:28,borderRadius:7,border:`1.5px solid ${hasModels?color:"#e8ddd0"}`,background:hasModels?`${color}15`:"transparent",color:hasModels?color:"#b0a090",cursor:"pointer",fontSize:hasModels?13:20,display:"flex",alignItems:"center",justifyContent:"center" }}>{hasModels?"✏️":"＋"}</button>}
-          {isOwner && item.custom && <button onClick={onDelete} style={{ width:28,height:28,borderRadius:7,border:"1.5px solid rgba(196,131,106,.25)",background:"rgba(196,131,106,.06)",color:C.terra,cursor:"pointer",fontSize:13,display:"flex",alignItems:"center",justifyContent:"center" }}>🗑️</button>}
+          {isOwner && <button onClick={onDelete} style={{ width:28,height:28,borderRadius:7,border:"1.5px solid rgba(196,131,106,.25)",background:"rgba(196,131,106,.06)",color:C.terra,cursor:"pointer",fontSize:13,display:"flex",alignItems:"center",justifyContent:"center" }}>🗑️</button>}
           {isOwner && !item.checked && (
             <button onClick={onToggle} style={{ ...btn({background:"#7a9e87",color:"white"}), padding:"5px 14px", fontSize:12, borderRadius:8 }}>
               ✓ J'ai reçu
@@ -575,7 +557,7 @@ function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenModels,
           )}
           {res && !isOwner && !canReserve && !item.checked && (
             <span style={{ fontSize:11,fontWeight:700,color:"#5a8a6a",background:"rgba(122,158,135,.12)",borderRadius:8,padding:"4px 10px",whiteSpace:"nowrap" }}>
-              🎁 J'achète
+              🎁 Réservé
             </span>
           )}
         </div>
@@ -619,10 +601,13 @@ function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenModels,
                   </div>
                   {m.notes&&<div style={{ fontSize:11,color:"#7a6a5a",marginTop:2,lineHeight:1.4 }}>{m.notes}</div>}
                   {mRes&&<div style={{ fontSize:11,color:"#5a8a6a",marginTop:2 }}>🎁 Réservé par {mRes.name}</div>}
-                  {safeUrl(m.url)&&<a href={safeUrl(m.url)} target="_blank" rel="noopener noreferrer" style={{ fontSize:11,color,fontWeight:600,textDecoration:"none",display:"inline-block",marginTop:3 }}>🔗 Voir →</a>}
+                  {(()=>{ const u=safeUrl(m.url); return u&&<a href={u} target="_blank" rel="noopener noreferrer" style={{ fontSize:11,color,fontWeight:600,textDecoration:"none",display:"inline-block",marginTop:3 }}>🔗 Voir →</a>; })()}
                 </div>
                 {canReserveModel && (
                   <button onClick={()=>onReserveModel(m.id)} style={{ ...btn({background:"#7a9e87",color:"white"}),padding:"5px 12px",fontSize:11,borderRadius:7,flexShrink:0 }}>🎁 J'achète</button>
+                )}
+                {isOwner && !mRes && (
+                  <button onClick={()=>onDeleteModel(m.id)} style={{ width:26,height:26,borderRadius:6,border:"1px solid rgba(196,131,106,.3)",background:"rgba(196,131,106,.06)",color:C.terra,cursor:"pointer",fontSize:12,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center" }}>🗑️</button>
                 )}
                 {mRes && isOwner && (
                   <button onClick={()=>onClearModelReserve(m.id)} style={{ fontSize:11,color:"#9a8a7a",background:"none",border:"1px solid #d8cdc0",borderRadius:6,cursor:"pointer",padding:"3px 9px",flexShrink:0 }}>Libérer</button>
@@ -649,7 +634,7 @@ function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenModels,
 
 // ─── Settings Modal ───────────────────────────────────────────────────────────
 function SettingsModal({ cfg, onClose, onReset, onUpdateKey }) {
-  const [familyKey, setFamilyKey] = useState("");
+  const [familyKey, setFamilyKey] = useState(cfg.apiKey || "");
   const [showFamilyKey, setShowFamilyKey] = useState(false);
   const [copiedReader, setCopiedReader] = useState(false);
   const [copiedFamily, setCopiedFamily] = useState(false);
@@ -777,17 +762,19 @@ export default function App() {
     const p = new URLSearchParams(window.location.search);
     const bid = p.get("binId"), ck = p.get("ck"), m = p.get("mode");
     if (bid && ck && m === "owner") { const c = { binId:bid, apiKey:ck, mode:"owner" }; saveCfg(c); return c; }
-    if (bid && ck)  return { binId:bid, apiKey:ck, mode:"contributor" };
+    if (bid && ck)  { const c = { binId:bid, apiKey:ck, mode:"contributor" }; saveCfg(c); return c; }
     if (bid)        return { binId:bid, mode:"reader" };
     return loadCfg();
   });
   const [sections, setSections] = useState([]);
+  const [loading, setLoading]   = useState(true);
   const [modal, setModal]       = useState(null);
   const [toast, setToast]       = useState({ msg:"", type:"ok" });
   const [syncState, setSyncState] = useState("idle");
   const [showSettings, setShowSettings] = useState(false);
   const [keyInvalid, setKeyInvalid] = useState(false);
   const saveTimer = useRef(null);
+  const isSavingRef = useRef(false);
   const isOwner       = cfg?.mode === "owner";
   const isContributor = cfg?.mode === "contributor";
 
@@ -798,32 +785,68 @@ export default function App() {
 
   // ── Load initial data ──
   useEffect(() => {
-    if (!cfg) return;
+    if (!cfg) { setLoading(false); return; }
+    setLoading(true);
+    clearLegacyDels();
+    const cache = loadLocalCache();
     apiRead(cfg.binId, cfg.apiKey)
-      .then(data => { setSections(mergeData(data)); setSyncState("saved"); })
+      .then(data => {
+        const remoteTime = new Date(data.updatedAt || 0).getTime();
+        const cacheTime  = cache?.t || 0;
+        let source = data;
+        if (cacheTime > remoteTime && cache?.remote) {
+          // Le cache local est plus récent que JSONbin (sauvegarde précédente n'a pas abouti)
+          // On utilise le cache ET on re-pousse vers JSONbin pour resynchroniser
+          source = cache.remote;
+          if (cfg.mode === "owner" || cfg.mode === "contributor") {
+            apiUpdate(cfg.binId, cfg.apiKey, source).catch(() => {});
+          }
+        }
+        setSections(mergeData(source));
+        setSyncState("saved");
+        setLoading(false);
+      })
       .catch(() => {
-        setSections(mergeData(buildInitialData()));
+        // Hors-ligne : utiliser le cache si disponible
+        const source = cache?.remote || buildInitialData();
+        setSections(mergeData(source));
         showToast("⚠ Chargement hors-ligne", "err");
+        setLoading(false);
       });
   }, [cfg?.binId]);
 
-  // ── Polling toutes les 15s (lecteur / contributeur) ──
+  // ── Polling toutes les 15s (tous les modes) ──
   useEffect(() => {
-    if (!cfg || isOwner) return;
+    if (!cfg) return;
     const t = setInterval(() => {
-      apiRead(cfg.binId, cfg.apiKey).then(data => setSections(mergeData(data))).catch(()=>{});
+      if (isSavingRef.current) return;
+      apiRead(cfg.binId, cfg.apiKey).then(data => {
+        if (!isSavingRef.current) {
+          const cache = loadLocalCache();
+          const remoteTime = new Date(data.updatedAt || 0).getTime();
+          const cacheTime  = cache?.t || 0;
+          const source = (cacheTime > remoteTime && cache?.remote) ? cache.remote : data;
+          setSections(mergeData(source));
+        }
+      }).catch(()=>{});
     }, 15000);
     return () => clearInterval(t);
-  }, [cfg?.binId, isOwner]);
+  }, [cfg?.binId]);
 
   // ── Save helpers ──
   const doSave = useCallback(async (nextSections) => {
-    if (cfg?.mode !== "owner" && cfg?.mode !== "contributor") return;
+    if (cfg?.mode !== "owner" && cfg?.mode !== "contributor") return false;
+    const remote = sectionsToRemote(nextSections);
+    // Écriture synchrone dans localStorage AVANT l'appel réseau :
+    // même si la page est rechargée pendant la sauvegarde, le cache survit.
+    saveLocalCache(remote);
+    isSavingRef.current = true;
     setSyncState("saving");
     try {
-      await apiUpdate(cfg.binId, cfg.apiKey, sectionsToRemote(nextSections));
+      await apiUpdate(cfg.binId, cfg.apiKey, remote);
       setSyncState("saved");
       showToast("✓ Synchronisé", "sync");
+      return true;
     } catch(e) {
       setSyncState("error");
       const raw = e.message || "";
@@ -836,6 +859,9 @@ export default function App() {
       } else {
         showToast("⚠ " + (parsed.message || raw || "Erreur de sauvegarde"), "err", 6000);
       }
+      return false;
+    } finally {
+      isSavingRef.current = false;
     }
   }, [cfg]);
 
@@ -853,33 +879,60 @@ export default function App() {
     update(secs => secs.map(s => s.id!==secId?s:{ ...s, items:s.items.map(i=>i.id!==itemId?i:{ ...i,...patch }) }));
   }
   function updateItemNow(secId, itemId, patch) {
-    setSections(prev => {
-      const next = prev.map(s => s.id!==secId?s:{ ...s, items:s.items.map(i=>i.id!==itemId?i:{ ...i,...patch }) });
-      doSave(next);
-      return next;
-    });
+    clearTimeout(saveTimer.current);
+    const next = sections.map(s => s.id!==secId?s:{ ...s, items:s.items.map(i=>i.id!==itemId?i:{ ...i,...patch }) });
+    setSections(next);
+    doSave(next);
   }
   function updateModel(secId, itemId, modelId, patch) {
-    setSections(prev => {
-      const next = prev.map(s => s.id!==secId?s:{ ...s, items:s.items.map(i=>i.id!==itemId?i:{ ...i, models:(i.models||[]).map(m=>m.id!==modelId?m:{...m,...patch}) }) });
-      doSave(next);
-      return next;
-    });
+    clearTimeout(saveTimer.current);
+    const next = sections.map(s => s.id!==secId?s:{ ...s, items:s.items.map(i=>i.id!==itemId?i:{ ...i, models:(i.models||[]).map(m=>m.id!==modelId?m:{...m,...patch}) }) });
+    setSections(next);
+    doSave(next);
   }
-  function addItem(secId, name, note, url) {
+  function addItem(secId, name, note, url, tags=[]) {
     const chosen = url ? { brand:"", url, price:"", notes:"" } : null;
-    const ni = { id:`c_${uid()}`,name,note,tags:[],checked:false,chosen,reservedBy:null,custom:true };
+    const ni = { id:`c_${uid()}`,name,note,tags,checked:false,chosen,reservedBy:null,custom:true };
     update(secs => secs.map(s => s.id!==secId?s:{ ...s,items:[...s.items,ni] }));
     setModal(null); showToast("✓ Article ajouté");
   }
   function deleteItem(secId, itemId) {
-    update(secs => secs.map(s => s.id!==secId?s:{ ...s,items:s.items.filter(i=>i.id!==itemId) }));
+    clearTimeout(saveTimer.current);
+    const target = sections.find(s => s.id===secId)?.items.find(i => i.id===itemId);
+    const isDefault = !target?.custom;
+    const next = isDefault
+      ? sections.map(s => s.id!==secId?s:{ ...s,items:s.items.map(i=>i.id!==itemId?i:{...i,hidden:true}) })
+      : sections.map(s => s.id!==secId?s:{ ...s,items:s.items.filter(i=>i.id!==itemId) });
+    setSections(next);
+    doSave(next);
+    showToast("Article supprimé");
+  }
+  function deleteModel(secId, itemId, modelId) {
+    clearTimeout(saveTimer.current);
+    const next = sections.map(s => s.id!==secId?s:{ ...s, items:s.items.map(i=>{
+      if (i.id!==itemId) return i;
+      const newModels = (i.models||[]).filter(m=>m.id!==modelId);
+      return { ...i, models: newModels, chosen: newModels.length > 0 ? i.chosen : null };
+    }) });
+    setSections(next);
+    doSave(next);
     showToast("Article supprimé");
   }
   function addSection(title) {
     const ns = { id:`sec_${uid()}`,priority:sections.length+1,label:"Personnalisé",color:PRIO_COLORS[6],title,tip:null,items:[],defaultItems:[] };
     update(secs => [...secs,ns]);
     setModal(null); showToast("✓ Section créée");
+  }
+  function deleteSection(secId) {
+    const sec = sections.find(s => s.id === secId);
+    if (sec && sec.items.length > 0) {
+      if (!window.confirm(`Supprimer "${sec.title}" et ses ${sec.items.length} article(s) ?`)) return;
+    }
+    clearTimeout(saveTimer.current);
+    const next = sections.filter(s => s.id !== secId);
+    setSections(next);
+    doSave(next);
+    showToast("Section supprimée");
   }
 
   function handleUpdateKey(newApiKey) {
@@ -893,10 +946,24 @@ export default function App() {
 
   if (!cfg) return <SetupScreen onDone={c => { saveCfg(c); setCfg(c); }}/>;
 
-  const allItems = sections.flatMap(s=>s.items);
+  if (loading) return (
+    <div style={{ minHeight:"100vh", background:C.cream, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:"'DM Sans',sans-serif" }}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;1,400&family=DM+Sans:wght@300;400&display=swap'); @keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}`}</style>
+      <div style={{ textAlign:"center" }}>
+        <div style={{ fontFamily:"'Playfair Display',serif", fontSize:24, color:C.ink, fontWeight:400, marginBottom:20 }}>
+          Bienvenue,<br/><em style={{ color:C.terra, fontStyle:"italic" }}>petit bout du monde</em>
+        </div>
+        <div style={{ display:"inline-block", width:28, height:28, border:`3px solid ${C.blush}`, borderTopColor:C.terra, borderRadius:"50%", animation:"spin .9s linear infinite" }}/>
+        <div style={{ fontSize:12, color:"#b0a090", marginTop:14, letterSpacing:1 }}>Chargement de la liste…</div>
+      </div>
+    </div>
+  );
+
+  const allItems = sections.flatMap(s=>s.items).filter(i=>!i.hidden);
   const total=allItems.length, checked=allItems.filter(i=>i.checked).length;
   const reserved=allItems.filter(i=>i.reservedBy).length;
-  const pct = total?Math.round((checked+reserved)/total*100):0;
+  const done=allItems.filter(i=>i.checked||i.reservedBy).length;
+  const pct = total?Math.round(done/total*100):0;
 
   const mSec  = modal ? sections.find(s=>s.id===modal.secId) : null;
   const mItem = modal?.itemId && mSec ? mSec.items.find(i=>i.id===modal.itemId) : null;
@@ -962,11 +1029,17 @@ export default function App() {
         {keyInvalid && (
           <div style={{ background:"rgba(196,131,106,.15)",borderBottom:"1.5px solid rgba(196,131,106,.4)",padding:"14px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap" }}>
             <div style={{ fontSize:13,color:C.terra,lineHeight:1.5 }}>
-              <strong>Clé JSONbin invalide.</strong> Allez sur <strong>jsonbin.io</strong> → API Keys, copiez votre Master Key actuelle, puis cliquez sur le bouton.
+              {isOwner ? (
+                <><strong>Clé JSONbin invalide.</strong> Allez sur <strong>jsonbin.io</strong> → API Keys, copiez votre Master Key actuelle, puis cliquez sur le bouton.</>
+              ) : (
+                <><strong>Impossible de sauvegarder votre réservation.</strong> Le lien que vous utilisez n'est plus valide. Demandez un nouveau lien famille aux parents.</>
+              )}
             </div>
-            <button onClick={()=>setShowSettings(true)} style={{ ...btn({background:C.terra,color:"white"}),whiteSpace:"nowrap",fontSize:12,padding:"8px 16px",flexShrink:0 }}>
-              Mettre à jour la clé ⚙️
-            </button>
+            {isOwner && (
+              <button onClick={()=>setShowSettings(true)} style={{ ...btn({background:C.terra,color:"white"}),whiteSpace:"nowrap",fontSize:12,padding:"8px 16px",flexShrink:0 }}>
+                Mettre à jour la clé ⚙️
+              </button>
+            )}
           </div>
         )}
 
@@ -1022,12 +1095,15 @@ export default function App() {
                 <div style={{ width:32,height:32,borderRadius:"50%",background:sec.color,color:"white",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Playfair Display',serif",fontSize:14,fontWeight:600,flexShrink:0 }}>{sec.priority}</div>
                 <div style={{ fontFamily:"'Playfair Display',serif",fontSize:19,fontWeight:600,color:C.ink }}>{sec.title}</div>
                 <div style={{ marginLeft:"auto",fontSize:10,letterSpacing:2,textTransform:"uppercase",fontWeight:700,padding:"3px 12px",borderRadius:20,background:`${sec.color}18`,color:sec.color,whiteSpace:"nowrap" }}>{sec.label}</div>
+                {isOwner && sec.label==="Personnalisé" && (
+                  <button onClick={()=>deleteSection(sec.id)} title="Supprimer cette section" style={{ background:"none",border:"none",cursor:"pointer",fontSize:16,padding:"2px 4px",color:"#c0392b",opacity:0.75,flexShrink:0 }}>🗑️</button>
+                )}
               </div>
 
               {sec.tip && sec.tip.cls==="orange" && <TipBox tip={sec.tip}/>}
 
               <div style={{ display:"flex",flexDirection:"column",gap:8 }}>
-                {sec.items.map(it=>(
+                {sec.items.filter(it=>!it.hidden).map(it=>(
                   <ItemCard
                     key={it.id} item={it} color={sec.color}
                     isOwner={isOwner} isContributor={isContributor}
@@ -1039,6 +1115,7 @@ export default function App() {
                     onOpenModels={()=>setModal({type:"models",secId:sec.id,itemId:it.id})}
                     onReserveModel={(modelId)=>setModal({type:"reserveModel",secId:sec.id,itemId:it.id,modelId})}
                     onClearModelReserve={(modelId)=>updateModel(sec.id,it.id,modelId,{reservedBy:null})}
+                    onDeleteModel={(modelId)=>deleteModel(sec.id,it.id,modelId)}
                   />
                 ))}
               </div>
@@ -1066,7 +1143,7 @@ export default function App() {
             <div style={{ fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:400,marginBottom:6 }}>Votre liste de naissance</div>
             <div style={{ fontSize:13,color:"rgba(250,246,241,.4)",fontWeight:300 }}>Bébé arrive en septembre — préparez sereinement !</div>
             <div style={{ display:"flex",justifyContent:"center",gap:"clamp(14px,4vw,32px)",marginTop:24,flexWrap:"wrap" }}>
-              {[{n:total,l:"articles"},{n:reserved,l:"réservés"},{n:checked,l:"reçus"},{n:total-reserved-checked,l:"disponibles"}].map(({n,l})=>(
+              {[{n:total,l:"articles"},{n:reserved,l:"réservés"},{n:checked,l:"reçus"},{n:total-done,l:"disponibles"}].map(({n,l})=>(
                 <div key={l} style={{ textAlign:"center" }}>
                   <div style={{ fontFamily:"'Playfair Display',serif",fontSize:30,color:C.blush,lineHeight:1 }}>{n}</div>
                   <div style={{ fontSize:10,color:"rgba(250,246,241,.35)",marginTop:4,letterSpacing:1,textTransform:"uppercase" }}>{l}</div>
@@ -1078,13 +1155,13 @@ export default function App() {
       </div>
 
       {/* ── Modals ── */}
-      {modal?.type==="addItem"&&mSec&&<AddItemModal sectionTitle={mSec.title} onAdd={(n,no,u)=>addItem(modal.secId,n,no,u)} onClose={()=>setModal(null)}/>}
-      {modal?.type==="edit"&&mItem&&<EditItemModal item={mItem} onSave={(n,no)=>{updateItem(modal.secId,modal.itemId,{name:n,note:no});setModal(null);showToast("✓ Modifié");}} onClose={()=>setModal(null)}/>}
+      {modal?.type==="addItem"&&mSec&&<AddItemModal sectionTitle={mSec.title} onAdd={(n,no,u,tg)=>addItem(modal.secId,n,no,u,tg)} onClose={()=>setModal(null)}/>}
+      {modal?.type==="edit"&&mItem&&<EditItemModal item={mItem} onSave={(n,no,tg)=>{updateItem(modal.secId,modal.itemId,{name:n,note:no,tags:tg});setModal(null);showToast("✓ Modifié");}} onClose={()=>setModal(null)}/>}
       {modal?.type==="addSection"&&<AddSectionModal onAdd={addSection} onClose={()=>setModal(null)}/>}
       {modal?.type==="reserve"&&mItem&&<ReserveModal item={mItem} color={mSec.color} onSave={r=>{updateItemNow(modal.secId,modal.itemId,{reservedBy:r});setModal(null);showToast("🎁 Acheté ! Merci !");}} onClose={()=>setModal(null)}/>}
-      {modal?.type==="models"&&mItem&&<ModelsModal item={mItem} color={mSec.color} onSave={models=>{updateItem(modal.secId,modal.itemId,{models});setModal(null);showToast("✓ Modèles enregistrés");}} onClose={()=>setModal(null)}/>}
+      {modal?.type==="models"&&mItem&&<ModelsModal item={mItem} color={mSec.color} onSave={models=>{updateItemNow(modal.secId,modal.itemId,{models});setModal(null);showToast("✓ Modèles enregistrés");}} onClose={()=>setModal(null)}/>}
       {modal?.type==="reserveModel"&&mItem&&(()=>{ const m=(mItem.models||[]).find(x=>x.id===modal.modelId); return m?<ReserveModal item={{...mItem,name:m.name,chosen:m.url?[{brand:"",url:m.url,price:"",notes:""}]:null}} color={mSec.color} onSave={r=>{updateModel(modal.secId,modal.itemId,modal.modelId,{reservedBy:r});setModal(null);showToast("🎁 Acheté ! Merci !");}} onClose={()=>setModal(null)}/>:null; })()}
-      {showSettings&&<SettingsModal cfg={cfg} onClose={()=>setShowSettings(false)} onReset={()=>{localStorage.removeItem(LOCAL_CFG);setCfg(null);setShowSettings(false);}} onUpdateKey={handleUpdateKey}/>}
+      {showSettings&&<SettingsModal cfg={cfg} onClose={()=>setShowSettings(false)} onReset={()=>{localStorage.removeItem(LOCAL_CFG);document.cookie=`${LOCAL_CFG}=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;SameSite=Lax`;setCfg(null);setShowSettings(false);}} onUpdateKey={handleUpdateKey}/>}
 
       <Toast msg={toast.msg} type={toast.type}/>
     </>
