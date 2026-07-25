@@ -118,7 +118,8 @@ function saveCfg(c) {
   try { localStorage.setItem(LOCAL_CFG, JSON.stringify(c)); } catch {}
   try {
     const expires = new Date(Date.now() + 365*24*60*60*1000).toUTCString();
-    document.cookie = `${LOCAL_CFG}=${encodeURIComponent(JSON.stringify(c))};expires=${expires};path=/;SameSite=Lax`;
+    const secure = window.location.protocol === "https:" ? ";Secure" : "";
+    document.cookie = `${LOCAL_CFG}=${encodeURIComponent(JSON.stringify(c))};expires=${expires};path=/;SameSite=Lax${secure}`;
   } catch {}
 }
 function loadCfg() {
@@ -139,17 +140,26 @@ function safeUrl(u) { return u && /^https?:\/\//i.test(u.trim()) ? u.trim() : nu
 // Principe : on écrit dans localStorage AVANT l'appel réseau.
 // Au rechargement, on compare l'horodatage du cache avec updatedAt de JSONbin.
 // Le plus récent gagne — donc même si JSONbin n'a pas reçu la sauvegarde, le cache prévaut.
+// Le cache est indexé PAR BIN : sans cela, ouvrir une deuxième liste faisait gagner
+// le cache de la première (plus récent) et l'écrasait par-dessus la seconde.
 const LOCAL_CACHE = "naissance-cache-v1";
-function saveLocalCache(remote) {
-  try { localStorage.setItem(LOCAL_CACHE, JSON.stringify({ t: Date.now(), remote })); } catch {}
+const cacheKey = (binId) => `${LOCAL_CACHE}:${binId}`;
+function saveLocalCache(binId, remote) {
+  if (!binId) return;
+  try { localStorage.setItem(cacheKey(binId), JSON.stringify({ t: Date.now(), remote })); } catch {}
 }
-function loadLocalCache() {
-  try { return JSON.parse(localStorage.getItem(LOCAL_CACHE)); } catch { return null; }
+function loadLocalCache(binId) {
+  if (!binId) return null;
+  try { return JSON.parse(localStorage.getItem(cacheKey(binId))); } catch { return null; }
 }
-// Nettoyage des anciennes clés de l'ancienne mécanique de suppressions en attente
+function clearLocalCache(binId) {
+  try { localStorage.removeItem(cacheKey(binId)); } catch {}
+}
+// Nettoyage des anciennes clés (suppressions en attente + cache non indexé par bin)
 function clearLegacyDels() {
   try { localStorage.removeItem("naissance-del-v1"); } catch {}
   try { localStorage.removeItem("naissance-mdel-v1"); } catch {}
+  try { localStorage.removeItem(LOCAL_CACHE); } catch {}
 }
 
 function buildInitialData() {
@@ -205,11 +215,11 @@ function sectionsToRemote(sections) {
     sections: sections.filter(s => defaultIds.has(s.id)).map(s => ({
       id: s.id,
       items: s.items.filter(i => !i.custom).map(i => ({ id:i.id, checked:i.checked, chosen:i.chosen, reservedBy:i.reservedBy||null, models:i.models||[], hidden:i.hidden||false })),
-      customItems: s.items.filter(i => i.custom).map(i => ({ id:i.id, name:i.name, note:i.note, tags:i.tags||[], checked:i.checked, chosen:i.chosen, reservedBy:i.reservedBy||null, models:i.models||[], custom:true })),
+      customItems: s.items.filter(i => i.custom).map(i => ({ id:i.id, name:i.name, note:i.note, tags:i.tags||[], checked:i.checked, chosen:i.chosen, reservedBy:i.reservedBy||null, models:i.models||[], hidden:i.hidden||false, custom:true })),
     })),
     customSections: sections.filter(s => !defaultIds.has(s.id)).map(s => ({
       id:s.id, title:s.title, label:s.label||"Personnalisé", priority:s.priority,
-      items: s.items.map(i => ({ id:i.id, name:i.name, note:i.note||"", tags:i.tags||[], checked:i.checked, chosen:i.chosen, reservedBy:i.reservedBy||null, models:i.models||[], custom:true })),
+      items: s.items.map(i => ({ id:i.id, name:i.name, note:i.note||"", tags:i.tags||[], checked:i.checked, chosen:i.chosen, reservedBy:i.reservedBy||null, models:i.models||[], hidden:i.hidden||false, custom:true })),
     })),
   };
 }
@@ -236,11 +246,14 @@ async function apiRead(binId, apiKey) {
 
 async function apiUpdate(binId, apiKey, data) {
   const body = JSON.stringify(data);
+  // keepalive est plafonné à 64 Ko par la spec Fetch : au-delà, la requête
+  // échouerait systématiquement. On ne l'active que pour les petites charges.
+  const canKeepalive = new Blob([body]).size < 60000;
   const res = await fetch(`${JSONBIN_API}/${binId}`, {
     method:"PUT",
     headers:{ "Content-Type":"application/json", "X-Master-Key":apiKey },
     body,
-    keepalive: true,
+    keepalive: canKeepalive,
   });
   if (!res.ok) { const t = await res.text(); throw new Error(t); }
   return res.json();
@@ -250,8 +263,20 @@ async function apiUpdate(binId, apiKey, data) {
 const btn = (extra={}) => ({ borderRadius:11, padding:"11px 16px", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", border:"none", ...extra });
 
 function Overlay({ onClose, children }) {
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    const onKey = e => { if (e.key === "Escape") closeRef.current?.(); };
+    document.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, []);
   return (
-    <div onClick={onClose} style={{ position:"fixed",inset:0,background:"rgba(20,12,4,.7)",zIndex:9000,display:"flex",alignItems:"center",justifyContent:"center",padding:20,backdropFilter:"blur(6px)" }}>
+    <div onClick={onClose} role="dialog" aria-modal="true" style={{ position:"fixed",inset:0,background:"rgba(20,12,4,.7)",zIndex:9000,display:"flex",alignItems:"center",justifyContent:"center",padding:20,backdropFilter:"blur(6px)" }}>
       <div onClick={e=>e.stopPropagation()} style={{ background:C.cream,borderRadius:22,padding:"30px 28px 24px",maxWidth:480,width:"100%",boxShadow:"0 32px 80px rgba(0,0,0,.25)",maxHeight:"90vh",overflowY:"auto" }}>
         {children}
       </div>
@@ -276,7 +301,7 @@ function TipBox({ tip }) {
 function Toast({ msg, type="ok" }) {
   if(!msg) return null;
   const colors = { ok:C.ink, err:"#c4836a", sync:"#7a9e87" };
-  return <div style={{ position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",background:colors[type]||C.ink,color:C.cream,padding:"10px 22px",borderRadius:30,fontSize:13,fontWeight:500,zIndex:9999,boxShadow:"0 8px 32px rgba(0,0,0,.2)",pointerEvents:"none",whiteSpace:"nowrap" }}>{msg}</div>;
+  return <div style={{ position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",background:colors[type]||C.ink,color:C.cream,padding:"10px 22px",borderRadius:20,fontSize:13,fontWeight:500,zIndex:9999,boxShadow:"0 8px 32px rgba(0,0,0,.2)",pointerEvents:"none",maxWidth:"calc(100vw - 32px)",textAlign:"center",lineHeight:1.4 }}>{msg}</div>;
 }
 
 // ─── Setup Screen ─────────────────────────────────────────────────────────────
@@ -346,7 +371,7 @@ function SetupScreen({ onDone }) {
           <div>
             <div style={{ background:"rgba(122,158,135,.08)", border:"1.5px solid rgba(122,158,135,.2)", borderRadius:12, padding:"12px 14px", marginBottom:18, fontSize:13, color:C.slate, lineHeight:1.6 }}>
               <strong style={{ color:C.sage, display:"block", marginBottom:4 }}>📋 Comment obtenir votre clé ?</strong>
-              1. Allez sur <a href="https://jsonbin.io" target="_blank" rel="noopener" style={{ color:C.terra, fontWeight:600 }}>jsonbin.io</a> → créez un compte gratuit<br/>
+              1. Allez sur <a href="https://jsonbin.io" target="_blank" rel="noopener noreferrer" style={{ color:C.terra, fontWeight:600 }}>jsonbin.io</a> → créez un compte gratuit<br/>
               2. Dashboard → <strong>API Keys</strong> → copiez votre <strong>Master Key</strong>
             </div>
             <FL>Master Key JSONbin</FL>
@@ -574,6 +599,11 @@ function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenModels,
       <div style={{ display:"flex",alignItems:"flex-start",gap:12,padding:"13px 13px 11px" }}>
         <div
           onClick={isOwner?onToggle:undefined}
+          role={isOwner?"checkbox":undefined}
+          aria-checked={isOwner?!!item.checked:undefined}
+          aria-label={isOwner?`Marquer « ${item.name} » comme reçu`:undefined}
+          tabIndex={isOwner?0:undefined}
+          onKeyDown={isOwner?(e=>{ if(e.key===" "||e.key==="Enter"){ e.preventDefault(); onToggle(); } }):undefined}
           style={{ width:22,height:22,borderRadius:7,flexShrink:0,marginTop:1,border:`2px solid ${item.checked?"#7a9e87":"#e8c5a8"}`,background:item.checked?"#7a9e87":"white",display:"flex",alignItems:"center",justifyContent:"center",cursor:isOwner?"pointer":"default",transition:"all .2s" }}
         >
           {item.checked&&<svg width="10" height="8" viewBox="0 0 10 8"><path d="M1 4l3 3 5-6" stroke="white" strokeWidth="1.8" fill="none" strokeLinecap="round"/></svg>}
@@ -586,9 +616,9 @@ function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenModels,
           {!hasModels&&(()=>{ const urls=(Array.isArray(item.chosen)?item.chosen:[item.chosen]).filter(Boolean).map(e=>safeUrl(e.url)).filter(Boolean); return urls.length?urls.map((u,i)=><a key={i} href={u} target="_blank" rel="noopener noreferrer" style={{ fontSize:11,color,fontWeight:600,textDecoration:"none",display:"inline-block",marginTop:3,marginRight:8 }}>🔗 {urls.length>1?`Option ${i+1} · `:""}Voir le produit →</a>):null; })()}
         </div>
         <div style={{ display:"flex",gap:5,flexShrink:0,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end" }}>
-          {isOwner && item.custom && <button onClick={onEdit} style={{ width:28,height:28,borderRadius:7,border:"1.5px solid #e8ddd0",background:"transparent",color:"#9a8a7a",cursor:"pointer",fontSize:13,display:"flex",alignItems:"center",justifyContent:"center" }}>✏️</button>}
-          {isOwner && <button onClick={onOpenModels} style={{ width:28,height:28,borderRadius:7,border:`1.5px solid ${hasModels?color:"#e8ddd0"}`,background:hasModels?`${color}15`:"transparent",color:hasModels?color:"#b0a090",cursor:"pointer",fontSize:hasModels?13:20,display:"flex",alignItems:"center",justifyContent:"center" }}>{hasModels?"✏️":"＋"}</button>}
-          {isOwner && <button onClick={onDelete} style={{ width:28,height:28,borderRadius:7,border:"1.5px solid rgba(196,131,106,.25)",background:"rgba(196,131,106,.06)",color:C.terra,cursor:"pointer",fontSize:13,display:"flex",alignItems:"center",justifyContent:"center" }}>🗑️</button>}
+          {isOwner && item.custom && <button onClick={onEdit} title="Modifier l'article" aria-label={`Modifier « ${item.name} »`} style={{ width:28,height:28,borderRadius:7,border:"1.5px solid #e8ddd0",background:"transparent",color:"#9a8a7a",cursor:"pointer",fontSize:13,display:"flex",alignItems:"center",justifyContent:"center" }}>✏️</button>}
+          {isOwner && <button onClick={onOpenModels} title={hasModels?"Modifier les modèles":"Ajouter des modèles"} aria-label={`${hasModels?"Modifier":"Ajouter"} les modèles de « ${item.name} »`} style={{ width:28,height:28,borderRadius:7,border:`1.5px solid ${hasModels?color:"#e8ddd0"}`,background:hasModels?`${color}15`:"transparent",color:hasModels?color:"#b0a090",cursor:"pointer",fontSize:hasModels?13:20,display:"flex",alignItems:"center",justifyContent:"center" }}>{hasModels?"✏️":"＋"}</button>}
+          {isOwner && <button onClick={onDelete} title="Supprimer l'article" aria-label={`Supprimer « ${item.name} »`} style={{ width:28,height:28,borderRadius:7,border:"1.5px solid rgba(196,131,106,.25)",background:"rgba(196,131,106,.06)",color:C.terra,cursor:"pointer",fontSize:13,display:"flex",alignItems:"center",justifyContent:"center" }}>🗑️</button>}
           {isOwner && !item.checked && (
             <button onClick={onToggle} style={{ ...btn({background:"#7a9e87",color:"white"}), padding:"5px 14px", fontSize:12, borderRadius:8 }}>
               ✓ J'ai reçu
@@ -661,7 +691,7 @@ function ItemCard({ item, color, isOwner, isContributor, onToggle, onOpenModels,
                   <button onClick={()=>onReserveModel(m.id)} style={{ ...btn({background:"#7a9e87",color:"white"}),padding:"5px 12px",fontSize:11,borderRadius:7,flexShrink:0 }}>🎁 J'achète</button>
                 )}
                 {isOwner && !mRes && (
-                  <button onClick={()=>onDeleteModel(m.id)} style={{ width:26,height:26,borderRadius:6,border:"1px solid rgba(196,131,106,.3)",background:"rgba(196,131,106,.06)",color:C.terra,cursor:"pointer",fontSize:12,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center" }}>🗑️</button>
+                  <button onClick={()=>onDeleteModel(m.id)} title="Supprimer ce modèle" aria-label={`Supprimer le modèle « ${m.name} »`} style={{ width:26,height:26,borderRadius:6,border:"1px solid rgba(196,131,106,.3)",background:"rgba(196,131,106,.06)",color:C.terra,cursor:"pointer",fontSize:12,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center" }}>🗑️</button>
                 )}
                 {mRes && isOwner && (
                   <button onClick={()=>onClearModelReserve(m.id)} style={{ fontSize:11,color:"#9a8a7a",background:"none",border:"1px solid #d8cdc0",borderRadius:6,cursor:"pointer",padding:"3px 9px",flexShrink:0 }}>Libérer</button>
@@ -815,36 +845,79 @@ export default function App() {
     // Connexion automatique via URL params (lien WhatsApp famille)
     const p = new URLSearchParams(window.location.search);
     const bid = p.get("binId"), ck = p.get("ck"), m = p.get("mode");
+    const stored = loadCfg();
     if (bid && ck && m === "owner") { const c = { binId:bid, apiKey:ck, mode:"owner" }; saveCfg(c); return c; }
-    if (bid && ck)  { const c = { binId:bid, apiKey:ck, mode:"contributor" }; saveCfg(c); return c; }
-    if (bid)        return { binId:bid, mode:"reader" };
-    return loadCfg();
+    if (bid && ck) {
+      // Ne pas rétrograder un propriétaire qui ouvrirait son propre lien famille
+      if (stored?.binId === bid && stored.mode === "owner") return stored;
+      const c = { binId:bid, apiKey:ck, mode:"contributor" }; saveCfg(c); return c;
+    }
+    if (bid) {
+      // Idem pour le lien lecture seule : on garde l'accès déjà obtenu sur cette liste
+      if (stored?.binId === bid && stored.apiKey) return stored;
+      // On persiste : l'URL est nettoyée juste après, il faut survivre au rechargement
+      const c = { binId:bid, mode:"reader" }; saveCfg(c); return c;
+    }
+    return stored;
   });
   const [sections, setSections] = useState([]);
   const [loading, setLoading]   = useState(true);
   const [modal, setModal]       = useState(null);
+  const modalRef                = useRef(null);
+  modalRef.current              = modal;
   const [toast, setToast]       = useState({ msg:"", type:"ok" });
   const [syncState, setSyncState] = useState("idle");
   const [showSettings, setShowSettings] = useState(false);
   const [keyInvalid, setKeyInvalid] = useState(false);
   const saveTimer = useRef(null);
   const isSavingRef = useRef(false);
+  const toastTimer  = useRef(null);
+  // Modifications locales pas encore confirmées par JSONbin : tant que c'est vrai,
+  // le polling ne doit JAMAIS écraser l'état local.
+  const dirtyRef    = useRef(false);
+  // Sauvegarde demandée par la dernière action locale : null | "debounced" | "now"
+  const pendingRef  = useRef(null);
   const isOwner       = cfg?.mode === "owner";
   const isContributor = cfg?.mode === "contributor";
+  const canWrite      = isOwner || isContributor;
 
-  function showToast(msg, type="ok", dur=2200) {
+  const showToast = useCallback((msg, type="ok", dur=2200) => {
+    clearTimeout(toastTimer.current);
     setToast({ msg, type });
-    setTimeout(()=>setToast({msg:"",type:"ok"}), dur);
-  }
+    toastTimer.current = setTimeout(()=>setToast({msg:"",type:"ok"}), dur);
+  }, []);
+  useEffect(() => () => { clearTimeout(toastTimer.current); clearTimeout(saveTimer.current); }, []);
+
+  // Retire binId / ck / mode de l'URL : la Master Key ne doit pas rester dans
+  // l'historique du navigateur, les captures d'écran ou le referrer.
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    if (!p.has("binId") && !p.has("ck") && !p.has("mode")) return;
+    p.delete("binId"); p.delete("ck"); p.delete("mode");
+    const q = p.toString();
+    window.history.replaceState({}, "", window.location.pathname + (q?`?${q}`:"") + window.location.hash);
+  }, []);
 
   // ── Load initial data ──
+  // Dépend aussi de apiKey : après « mettre à jour la Master Key », il faut
+  // relire avec la nouvelle clé (sinon toutes les requêtes restaient en 401).
   useEffect(() => {
-    if (!cfg) { setLoading(false); return; }
+    if (!cfg?.binId) { setLoading(false); return; }
+    const { binId, apiKey, mode } = cfg;
+    let cancelled = false;
+    // Un rechargement complet remplace l'état en cours : on annule la sauvegarde
+    // en attente et on repart d'une synchro propre (sinon un échec précédent
+    // laissait dirtyRef à true et gelait définitivement le polling). Le travail
+    // non sauvegardé n'est pas perdu : il est dans le cache, qui gagne ci-dessous.
+    clearTimeout(saveTimer.current);
+    pendingRef.current = null;
+    dirtyRef.current = false;
     setLoading(true);
     clearLegacyDels();
-    const cache = loadLocalCache();
-    apiRead(cfg.binId, cfg.apiKey)
+    const cache = loadLocalCache(binId);
+    apiRead(binId, apiKey)
       .then(data => {
+        if (cancelled) return;
         const remoteTime = new Date(data.updatedAt || 0).getTime();
         const cacheTime  = cache?.t || 0;
         let source = data;
@@ -852,8 +925,8 @@ export default function App() {
           // Le cache local est plus récent que JSONbin (sauvegarde précédente n'a pas abouti)
           // On utilise le cache ET on re-pousse vers JSONbin pour resynchroniser
           source = cache.remote;
-          if (cfg.mode === "owner" || cfg.mode === "contributor") {
-            apiUpdate(cfg.binId, cfg.apiKey, source).catch(() => {});
+          if (mode === "owner" || mode === "contributor") {
+            apiUpdate(binId, apiKey, source).catch(() => {});
           }
         }
         setSections(mergeData(source));
@@ -861,47 +934,56 @@ export default function App() {
         setLoading(false);
       })
       .catch(() => {
+        if (cancelled) return;
         // Hors-ligne : utiliser le cache si disponible
         const source = cache?.remote || buildInitialData();
         setSections(mergeData(source));
         showToast("⚠ Chargement hors-ligne", "err");
         setLoading(false);
       });
-  }, [cfg?.binId]);
+    return () => { cancelled = true; };
+  }, [cfg?.binId, cfg?.apiKey, showToast]);
 
   // ── Polling toutes les 15s (tous les modes) ──
   useEffect(() => {
-    if (!cfg) return;
+    if (!cfg?.binId) return;
+    const { binId, apiKey } = cfg;
+    // On ne rafraîchit jamais par-dessus du travail local non sauvegardé, ni
+    // pendant qu'une fenêtre « Modèles » est ouverte (son formulaire est un
+    // instantané : le rafraîchir en arrière-plan ferait réécrire des données périmées).
+    const busy = () => isSavingRef.current || dirtyRef.current || pendingRef.current !== null;
     const t = setInterval(() => {
-      if (isSavingRef.current) return;
-      apiRead(cfg.binId, cfg.apiKey).then(data => {
-        if (!isSavingRef.current) {
-          const cache = loadLocalCache();
-          const remoteTime = new Date(data.updatedAt || 0).getTime();
-          const cacheTime  = cache?.t || 0;
-          const source = (cacheTime > remoteTime && cache?.remote) ? cache.remote : data;
-          setSections(mergeData(source));
-        }
+      if (busy() || modalRef.current?.type === "models") return;
+      apiRead(binId, apiKey).then(data => {
+        if (busy() || modalRef.current?.type === "models") return;
+        const cache = loadLocalCache(binId);
+        const remoteTime = new Date(data.updatedAt || 0).getTime();
+        const cacheTime  = cache?.t || 0;
+        const source = (cacheTime > remoteTime && cache?.remote) ? cache.remote : data;
+        setSections(mergeData(source));
       }).catch(()=>{});
     }, 15000);
     return () => clearInterval(t);
-  }, [cfg?.binId]);
+  }, [cfg?.binId, cfg?.apiKey]);
 
   // ── Save helpers ──
   const doSave = useCallback(async (nextSections) => {
-    if (cfg?.mode !== "owner" && cfg?.mode !== "contributor") return false;
+    if (cfg?.mode !== "owner" && cfg?.mode !== "contributor") { dirtyRef.current = false; return false; }
     const remote = sectionsToRemote(nextSections);
     // Écriture synchrone dans localStorage AVANT l'appel réseau :
     // même si la page est rechargée pendant la sauvegarde, le cache survit.
-    saveLocalCache(remote);
+    saveLocalCache(cfg.binId, remote);
     isSavingRef.current = true;
     setSyncState("saving");
     try {
       await apiUpdate(cfg.binId, cfg.apiKey, remote);
+      dirtyRef.current = false;
       setSyncState("saved");
       showToast("✓ Synchronisé", "sync");
       return true;
     } catch(e) {
+      // On garde dirtyRef à true : le polling ne doit pas remplacer un travail
+      // local qui n'a pas encore atteint JSONbin.
       setSyncState("error");
       const raw = e.message || "";
       let parsed = {};
@@ -917,82 +999,80 @@ export default function App() {
     } finally {
       isSavingRef.current = false;
     }
-  }, [cfg]);
+  }, [cfg, showToast]);
 
-  const scheduleSave = useCallback((nextSections) => {
-    if (cfg?.mode !== "owner" && cfg?.mode !== "contributor") return;
-    setSyncState("saving");
+  // Toutes les modifications passent par `update` avec une mise à jour
+  // fonctionnelle : deux actions rapprochées dans le même cycle de rendu ne
+  // peuvent plus s'annuler l'une l'autre (l'ancien code repartait de la variable
+  // `sections` figée par la fermeture).
+  const update = useCallback((fn, immediate=false) => {
+    if (canWrite) {
+      dirtyRef.current = true;
+      if (pendingRef.current !== "now") pendingRef.current = immediate ? "now" : "debounced";
+      setSyncState("saving");
+    }
+    setSections(prev => fn(prev));
+  }, [canWrite]);
+
+  // Déclenche la sauvegarde une fois le nouvel état effectivement appliqué.
+  useEffect(() => {
+    const mode = pendingRef.current;
+    if (!mode || !canWrite) return;
+    pendingRef.current = null;
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => doSave(nextSections), 900);
-  }, [cfg, doSave]);
+    // Cache écrit immédiatement : un rechargement pendant le délai anti-rebond
+    // ne perd plus la modification.
+    saveLocalCache(cfg.binId, sectionsToRemote(sections));
+    if (mode === "now") doSave(sections);
+    else saveTimer.current = setTimeout(() => doSave(sections), 900);
+  }, [sections, canWrite, cfg?.binId, doSave]);
 
-  function update(fn) {
-    setSections(prev => { const next = fn(prev); scheduleSave(next); return next; });
-  }
-  function updateItem(secId, itemId, patch) {
-    update(secs => secs.map(s => s.id!==secId?s:{ ...s, items:s.items.map(i=>i.id!==itemId?i:{ ...i,...patch }) }));
+  function updateItem(secId, itemId, patch, immediate=false) {
+    update(secs => secs.map(s => s.id!==secId?s:{ ...s, items:s.items.map(i=>i.id!==itemId?i:{ ...i,...patch }) }), immediate);
   }
   function updateItemNow(secId, itemId, patch) {
-    clearTimeout(saveTimer.current);
-    const next = sections.map(s => s.id!==secId?s:{ ...s, items:s.items.map(i=>i.id!==itemId?i:{ ...i,...patch }) });
-    setSections(next);
-    doSave(next);
+    updateItem(secId, itemId, patch, true);
   }
   function updateModel(secId, itemId, modelId, patch) {
-    clearTimeout(saveTimer.current);
-    const next = sections.map(s => s.id!==secId?s:{ ...s, items:s.items.map(i=>i.id!==itemId?i:{ ...i, models:(i.models||[]).map(m=>m.id!==modelId?m:{...m,...patch}) }) });
-    setSections(next);
-    doSave(next);
+    update(secs => secs.map(s => s.id!==secId?s:{ ...s, items:s.items.map(i=>i.id!==itemId?i:{ ...i, models:(i.models||[]).map(m=>m.id!==modelId?m:{...m,...patch}) }) }), true);
   }
   function addItem(secId, name, note, url, tags=[]) {
     const chosen = url ? { brand:"", url, price:"", notes:"" } : null;
-    const ni = { id:`c_${uid()}`,name,note,tags,checked:false,chosen,reservedBy:null,custom:true };
+    const ni = { id:`c_${uid()}`,name,note,tags,checked:false,chosen,reservedBy:null,models:[],hidden:false,custom:true };
     update(secs => secs.map(s => s.id!==secId?s:{ ...s,items:[...s.items,ni] }));
     setModal(null); showToast("✓ Article ajouté");
   }
   function deleteItem(secId, itemId) {
-    clearTimeout(saveTimer.current);
-    const target = sections.find(s => s.id===secId)?.items.find(i => i.id===itemId);
-    const isDefault = !target?.custom;
-    const next = isDefault
-      ? sections.map(s => s.id!==secId?s:{ ...s,items:s.items.map(i=>i.id!==itemId?i:{...i,hidden:true}) })
-      : sections.map(s => s.id!==secId?s:{ ...s,items:s.items.filter(i=>i.id!==itemId) });
-    setSections(next);
-    doSave(next);
-    showToast("Article supprimé");
+    // Masquage plutôt que suppression définitive, pour les articles par défaut
+    // ET personnalisés : le tiroir « articles supprimés » promet une restauration.
+    update(secs => secs.map(s => s.id!==secId?s:{ ...s,items:s.items.map(i=>i.id!==itemId?i:{...i,hidden:true}) }), true);
+    showToast("Article supprimé — restaurable plus bas");
+  }
+  function purgeItem(secId, itemId) {
+    update(secs => secs.map(s => s.id!==secId?s:{ ...s,items:s.items.filter(i=>i.id!==itemId) }), true);
+    showToast("Article supprimé définitivement");
   }
   function deleteModel(secId, itemId, modelId) {
-    clearTimeout(saveTimer.current);
-    const next = sections.map(s => s.id!==secId?s:{ ...s, items:s.items.map(i=>{
+    update(secs => secs.map(s => s.id!==secId?s:{ ...s, items:s.items.map(i=>{
       if (i.id!==itemId) return i;
       const newModels = (i.models||[]).filter(m=>m.id!==modelId);
       return { ...i, models: newModels, chosen: newModels.length > 0 ? i.chosen : null };
-    }) });
-    setSections(next);
-    doSave(next);
-    showToast("Article supprimé");
+    }) }), true);
+    showToast("Modèle supprimé");
   }
   function addSection(title) {
-    const ns = { id:`sec_${uid()}`,priority:sections.length+1,label:"Personnalisé",color:PRIO_COLORS[6],title,tip:null,items:[],defaultItems:[] };
-    update(secs => [...secs,ns]);
+    update(secs => [...secs, { id:`sec_${uid()}`,priority:secs.length+1,label:"Personnalisé",color:PRIO_COLORS[6],title,tip:null,items:[],defaultItems:[] }]);
     setModal(null); showToast("✓ Section créée");
   }
   function deleteSection(secId) {
     const sec = sections.find(s => s.id === secId);
-    if (sec && sec.items.length > 0) {
-      if (!window.confirm(`Supprimer "${sec.title}" et ses ${sec.items.length} article(s) ?`)) return;
-    }
-    clearTimeout(saveTimer.current);
-    const next = sections.filter(s => s.id !== secId);
-    setSections(next);
-    doSave(next);
+    const visible = sec ? sec.items.filter(i => !i.hidden).length : 0;
+    if (visible > 0 && !window.confirm(`Supprimer "${sec.title}" et ses ${visible} article(s) ?`)) return;
+    update(secs => secs.filter(s => s.id !== secId), true);
     showToast("Section supprimée");
   }
   function restoreItem(secId, itemId) {
-    clearTimeout(saveTimer.current);
-    const next = sections.map(s => s.id!==secId?s:{ ...s,items:s.items.map(i=>i.id!==itemId?i:{...i,hidden:false}) });
-    setSections(next);
-    doSave(next);
+    update(secs => secs.map(s => s.id!==secId?s:{ ...s,items:s.items.map(i=>i.id!==itemId?i:{...i,hidden:false}) }), true);
     showToast("✓ Article restauré");
   }
 
@@ -1021,9 +1101,13 @@ export default function App() {
   );
 
   const allItems = sections.flatMap(s=>s.items).filter(i=>!i.hidden);
+  // Un article dont un MODÈLE est réservé compte comme réservé : quand un article
+  // a des modèles, c'est même le seul moyen de le réserver (le bouton « J'achète »
+  // de l'article est masqué). Sans cela les compteurs restaient bloqués à zéro.
+  const isReserved = i => !!i.reservedBy || (i.models||[]).some(m=>m.reservedBy);
   const total=allItems.length, checked=allItems.filter(i=>i.checked).length;
-  const reserved=allItems.filter(i=>i.reservedBy).length;
-  const done=allItems.filter(i=>i.checked||i.reservedBy).length;
+  const reserved=allItems.filter(isReserved).length;
+  const done=allItems.filter(i=>i.checked||isReserved(i)).length;
   const pct = total?Math.round(done/total*100):0;
 
   const mSec  = modal ? sections.find(s=>s.id===modal.secId) : null;
@@ -1150,10 +1234,11 @@ export default function App() {
           </div>
 
           {/* ── Sections ── */}
-          {sections.map(sec => (
+          {sections.map((sec, secIdx) => (
             <div key={sec.id} style={{ marginTop:34,animation:"fadeUp .5s ease both" }}>
               <div style={{ display:"flex",alignItems:"center",gap:12,marginBottom:14,paddingBottom:12,borderBottom:`1px solid ${C.warm}` }}>
-                <div style={{ width:32,height:32,borderRadius:"50%",background:sec.color,color:"white",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Playfair Display',serif",fontSize:14,fontWeight:600,flexShrink:0 }}>{sec.priority}</div>
+                {/* numéro dérivé de la position : supprimer une section ne crée plus de doublons */}
+                <div style={{ width:32,height:32,borderRadius:"50%",background:sec.color,color:"white",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Playfair Display',serif",fontSize:14,fontWeight:600,flexShrink:0 }}>{secIdx+1}</div>
                 <div style={{ fontFamily:"'Playfair Display',serif",fontSize:19,fontWeight:600,color:C.ink }}>{sec.title}</div>
                 <div style={{ marginLeft:"auto",fontSize:10,letterSpacing:2,textTransform:"uppercase",fontWeight:700,padding:"3px 12px",borderRadius:20,background:`${sec.color}18`,color:sec.color,whiteSpace:"nowrap" }}>{sec.label}</div>
                 {isOwner && sec.label==="Personnalisé" && (
@@ -1189,11 +1274,18 @@ export default function App() {
                   </summary>
                   <div style={{ marginTop:8,display:"flex",flexDirection:"column",gap:5 }}>
                     {sec.items.filter(it=>it.hidden).map(it=>(
-                      <div key={it.id} style={{ display:"flex",alignItems:"center",gap:10,padding:"8px 13px",background:"white",borderRadius:10,border:"1.5px dashed #e8ddd0",opacity:.75 }}>
-                        <div style={{ flex:1,fontSize:13,color:"#9a8a7a",textDecoration:"line-through" }}>{it.name}</div>
+                      <div key={it.id} style={{ display:"flex",alignItems:"center",gap:8,padding:"8px 13px",background:"white",borderRadius:10,border:"1.5px dashed #e8ddd0",opacity:.75,flexWrap:"wrap" }}>
+                        <div style={{ flex:1,minWidth:120,fontSize:13,color:"#9a8a7a",textDecoration:"line-through" }}>{it.name}</div>
                         <button onClick={()=>restoreItem(sec.id,it.id)} style={{ ...btn({background:"rgba(122,158,135,.1)",color:"#5a8a6a",border:"1.5px solid rgba(122,158,135,.3)"}),padding:"5px 14px",fontSize:12 }}>
                           ↩ Restaurer
                         </button>
+                        {it.custom && (
+                          <button onClick={()=>{ if(window.confirm(`Supprimer définitivement "${it.name}" ? Cette action est irréversible.`)) purgeItem(sec.id,it.id); }}
+                            title="Supprimer définitivement" aria-label={`Supprimer définitivement « ${it.name} »`}
+                            style={{ ...btn({background:"rgba(196,131,106,.08)",color:C.terra,border:"1.5px solid rgba(196,131,106,.3)"}),padding:"5px 12px",fontSize:12 }}>
+                            🗑️ Définitivement
+                          </button>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -1238,9 +1330,17 @@ export default function App() {
       {modal?.type==="edit"&&mItem&&<EditItemModal item={mItem} onSave={(n,no,tg)=>{updateItem(modal.secId,modal.itemId,{name:n,note:no,tags:tg});setModal(null);showToast("✓ Modifié");}} onClose={()=>setModal(null)}/>}
       {modal?.type==="addSection"&&<AddSectionModal onAdd={addSection} onClose={()=>setModal(null)}/>}
       {modal?.type==="reserve"&&mItem&&<ReserveModal item={mItem} color={mSec.color} onSave={r=>{updateItemNow(modal.secId,modal.itemId,{reservedBy:r});setModal(null);showToast("🎁 Acheté ! Merci !");}} onClose={()=>setModal(null)}/>}
-      {modal?.type==="models"&&mItem&&<ModelsModal item={mItem} color={mSec.color} onSave={models=>{updateItemNow(modal.secId,modal.itemId,{models});setModal(null);showToast("✓ Modèles enregistrés");}} onClose={()=>setModal(null)}/>}
+      {modal?.type==="models"&&mItem&&<ModelsModal key={mItem.id} item={mItem} color={mSec.color} onSave={models=>{updateItemNow(modal.secId,modal.itemId,{models});setModal(null);showToast("✓ Modèles enregistrés");}} onClose={()=>setModal(null)}/>}
       {modal?.type==="reserveModel"&&mItem&&(()=>{ const m=(mItem.models||[]).find(x=>x.id===modal.modelId); return m?<ReserveModal item={{...mItem,name:m.name,chosen:m.url?[{brand:"",url:m.url,price:"",notes:""}]:null}} color={mSec.color} onSave={r=>{updateModel(modal.secId,modal.itemId,modal.modelId,{reservedBy:r});setModal(null);showToast("🎁 Acheté ! Merci !");}} onClose={()=>setModal(null)}/>:null; })()}
-      {showSettings&&<SettingsModal cfg={cfg} onClose={()=>setShowSettings(false)} onReset={()=>{localStorage.removeItem(LOCAL_CFG);document.cookie=`${LOCAL_CFG}=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;SameSite=Lax`;setCfg(null);setShowSettings(false);}} onUpdateKey={handleUpdateKey}/>}
+      {showSettings&&<SettingsModal cfg={cfg} onClose={()=>setShowSettings(false)} onReset={()=>{
+        // Le cache de CETTE liste doit partir avec la config : sinon il « gagnait »
+        // ensuite sur la liste suivante et était même repoussé dans son bin.
+        clearTimeout(saveTimer.current); pendingRef.current=null; dirtyRef.current=false;
+        clearLocalCache(cfg.binId);
+        localStorage.removeItem(LOCAL_CFG);
+        document.cookie=`${LOCAL_CFG}=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;SameSite=Lax`;
+        setSections([]); setCfg(null); setShowSettings(false);
+      }} onUpdateKey={handleUpdateKey}/>}
 
       <Toast msg={toast.msg} type={toast.type}/>
     </>
