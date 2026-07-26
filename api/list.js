@@ -52,23 +52,45 @@ async function writeRecord(id, record) {
   });
 }
 
-// Neutralise toutes les réservations d'une charge utile, pour pouvoir vérifier
-// qu'une écriture « famille » n'a touché QUE des réservations.
-function withoutReservations(data) {
-  const cleanItem = (i) => ({
-    ...i,
-    reservedBy: null,
-    models: (i.models || []).map((m) => ({ ...m, reservedBy: null })),
-  });
-  const cleanSection = (s) => ({
+// Écriture « famille » : au lieu de comparer les deux documents et de refuser
+// s'ils diffèrent, on REPART du document stocké et on n'y reporte que les
+// réservations, appariées par identifiant. Tout le reste de la charge utile
+// reçue est ignoré.
+//
+// C'est plus sûr (un proche ne peut rien modifier d'autre par construction, pas
+// par comparaison) et plus robuste : une comparaison globale aurait rejeté
+// toutes les réservations dès que la liste par défaut de l'application évolue,
+// puisque le document stocké aurait alors une structure différente.
+function applyReservationsOnly(stored, incoming) {
+  const byId = new Map();
+  const collect = (secs) => (secs || []).forEach((s) =>
+    [...(s.items || []), ...(s.customItems || [])].forEach((i) => i?.id && byId.set(i.id, i)));
+  collect(incoming?.sections);
+  collect(incoming?.customSections);
+
+  const mapItem = (i) => {
+    const inc = byId.get(i.id);
+    if (!inc) return i;
+    return {
+      ...i,
+      reservedBy: inc.reservedBy ?? null,
+      models: (i.models || []).map((m) => {
+        const im = (inc.models || []).find((x) => x.id === m.id);
+        return im ? { ...m, reservedBy: im.reservedBy ?? null } : m;
+      }),
+    };
+  };
+  const mapSection = (s) => ({
     ...s,
-    items: (s.items || []).map(cleanItem),
-    customItems: (s.customItems || []).map(cleanItem),
+    items: (s.items || []).map(mapItem),
+    customItems: (s.customItems || []).map(mapItem),
   });
-  return JSON.stringify({
-    sections: (data?.sections || []).map(cleanSection),
-    customSections: (data?.customSections || []).map(cleanSection),
-  });
+
+  return {
+    ...stored,
+    sections: (stored?.sections || []).map(mapSection),
+    customSections: (stored?.customSections || []).map(mapSection),
+  };
 }
 
 function send(res, status, body) {
@@ -136,13 +158,11 @@ export default async function handler(req, res) {
       const isFamily = !isOwner && sameHash(String(token || ""), String(rec.family || ""));
       if (!isOwner && !isFamily) return send(res, 403, { error: "forbidden" });
 
-      if (isFamily && withoutReservations(data) !== withoutReservations(rec.data)) {
-        return send(res, 403, { error: "reservations_only",
-          message: "Le lien famille ne permet de modifier que les réservations." });
-      }
+      // Un proche ne peut jamais écrire autre chose que des réservations.
+      const nextData = isFamily ? applyReservationsOnly(rec.data, data) : data;
 
       const updatedAt = new Date().toISOString();
-      await writeRecord(id, { ...rec, updatedAt, data });
+      await writeRecord(id, { ...rec, updatedAt, data: nextData });
       return send(res, 200, { ok: true, updatedAt });
     }
 
