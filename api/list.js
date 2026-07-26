@@ -68,8 +68,10 @@ function applyReservationsOnly(stored, incoming) {
   collect(incoming?.sections);
   collect(incoming?.customSections);
 
+  const seen = new Set();
   const mapItem = (i) => {
     const inc = byId.get(i.id);
+    seen.add(i.id);
     if (!inc) return i;
     return {
       ...i,
@@ -86,11 +88,36 @@ function applyReservationsOnly(stored, incoming) {
     customItems: (s.customItems || []).map(mapItem),
   });
 
-  return {
+  const next = {
     ...stored,
     sections: (stored?.sections || []).map(mapSection),
     customSections: (stored?.customSections || []).map(mapSection),
   };
+
+  // Une réservation peut viser un article absent du document stocké : liste
+  // créée avant l'ajout de cet article par défaut, ou propriétaire n'ayant pas
+  // encore sauvegardé depuis. Sans ce rattrapage la réservation serait perdue
+  // en silence — le proche croirait avoir réservé.
+  // On n'ajoute QUE l'identifiant et la réservation : aucun texte libre venant
+  // du proche ne peut entrer dans la liste par ce biais.
+  const reserved = (i) => i?.reservedBy || (i?.models || []).some((m) => m?.reservedBy);
+  (incoming?.sections || []).forEach((incSec) => {
+    if (!incSec?.id) return;
+    const manquants = [...(incSec.items || []), ...(incSec.customItems || [])]
+      .filter((i) => i?.id && !seen.has(i.id) && reserved(i))
+      .map((i) => ({
+        id: i.id,
+        reservedBy: i.reservedBy ?? null,
+        models: (i.models || []).filter((m) => m?.id && m.reservedBy)
+                                .map((m) => ({ id: m.id, reservedBy: m.reservedBy })),
+      }));
+    if (!manquants.length) return;
+    let sec = next.sections.find((s) => s.id === incSec.id);
+    if (!sec) { sec = { id: incSec.id, items: [], customItems: [] }; next.sections.push(sec); }
+    sec.items = [...(sec.items || []), ...manquants];
+  });
+
+  return next;
 }
 
 function send(res, status, body) {
