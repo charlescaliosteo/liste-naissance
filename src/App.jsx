@@ -137,17 +137,28 @@ function loadCfg() {
 function safeUrl(u) { return u && /^https?:\/\//i.test(u.trim()) ? u.trim() : null; }
 
 // ─── Cache local (survit au rechargement) ────────────────────────────────────
-// Principe : on écrit dans localStorage AVANT l'appel réseau.
-// Au rechargement, on compare l'horodatage du cache avec updatedAt de JSONbin.
-// Le plus récent gagne — donc même si JSONbin n'a pas reçu la sauvegarde, le cache prévaut.
+// Principe : on écrit dans localStorage AVANT l'appel réseau, et on marque
+// l'écriture « pending ». Le cache ne l'emporte sur JSONbin QUE s'il est encore
+// pending, c'est-à-dire si la sauvegarde n'a jamais abouti.
+//
+// L'ancienne règle comparait Date.now() de CET appareil à updatedAt écrit par
+// l'appareil de l'autre parent. Deux horloges différentes : si celle du
+// co-parent avançait un peu, son cache gagnait systématiquement, il ne voyait
+// plus aucune modification de l'autre — et son client repoussait ses données
+// périmées dans le bin, ressuscitant les articles supprimés.
+//
 // Le cache est indexé PAR BIN : sans cela, ouvrir une deuxième liste faisait gagner
-// le cache de la première (plus récent) et l'écrasait par-dessus la seconde.
+// le cache de la première et l'écrasait par-dessus la seconde.
 const LOCAL_CACHE = "naissance-cache-v1";
 const cacheKey = (binId) => `${LOCAL_CACHE}:${binId}`;
-function saveLocalCache(binId, remote) {
+function saveLocalCache(binId, remote, pending) {
   if (!binId) return;
-  try { localStorage.setItem(cacheKey(binId), JSON.stringify({ t: Date.now(), remote })); } catch {}
+  try { localStorage.setItem(cacheKey(binId), JSON.stringify({ t: Date.now(), pending: !!pending, remote })); } catch {}
 }
+// Travail local jamais confirmé par JSONbin. Les caches de l'ancienne version
+// n'ont pas de champ `pending` : on les considère comme déjà synchronisés,
+// c'est le choix sûr (JSONbin fait autorité).
+function pendingCache(cache) { return cache?.pending && cache?.remote ? cache.remote : null; }
 function loadLocalCache(binId) {
   if (!binId) return null;
   try { return JSON.parse(localStorage.getItem(cacheKey(binId))); } catch { return null; }
@@ -225,13 +236,39 @@ function sectionsToRemote(sections) {
 }
 
 // ─── JSONbin API calls ────────────────────────────────────────────────────────
+// Construit une erreur qui conserve le code HTTP et distingue les causes.
+// Sans cela, « quota épuisé » (403) était rapporté comme « clé invalide » :
+// l'utilisateur ressaisissait indéfiniment une clé pourtant correcte.
+async function apiError(res) {
+  const raw = await res.text();
+  let parsed = {};
+  try { parsed = JSON.parse(raw); } catch {}
+  const msg = parsed.message || raw || `Erreur ${res.status}`;
+  const err = new Error(msg);
+  err.status = res.status;
+  err.quotaExhausted = /requests?\s+exhausted/i.test(msg);
+  err.notFound = res.status === 404 || /bin not found/i.test(msg);
+  err.authError = !err.quotaExhausted && !err.notFound && (res.status === 401 || res.status === 403);
+  err.tooLarge = /over 100kb|too large/i.test(msg);
+  return err;
+}
+
+// Message en français, actionnable, pour l'utilisateur final.
+function apiErrorText(e) {
+  if (e?.quotaExhausted) return "Quota JSONbin épuisé — le compte a consommé ses 10 000 requêtes offertes. Rachetez des requêtes sur jsonbin.io ou créez un nouveau compte.";
+  if (e?.tooLarge)       return "Liste trop volumineuse pour un compte gratuit JSONbin (limite 100 Ko).";
+  if (e?.notFound)       return "Liste introuvable : vérifiez le BIN ID.";
+  if (e?.authError)      return "Master Key refusée : soit elle a été regénérée, soit cette liste appartient à un autre compte jsonbin.";
+  return e?.message || "Problème réseau.";
+}
+
 async function apiCreate(apiKey, data) {
   const res = await fetch(JSONBIN_API, {
     method:"POST",
     headers:{ "Content-Type":"application/json", "X-Master-Key":apiKey, "X-Bin-Name":"liste-naissance-2025", "X-Bin-Private":"false" },
     body: JSON.stringify(data),
   });
-  if (!res.ok) { const t = await res.text(); throw new Error(t); }
+  if (!res.ok) throw await apiError(res);
   const j = await res.json();
   return j.metadata.id;
 }
@@ -240,7 +277,7 @@ async function apiRead(binId, apiKey) {
   const headers = { "X-Bin-Meta":"false" };
   if (apiKey) headers["X-Master-Key"] = apiKey;
   const res = await fetch(`${JSONBIN_API}/${binId}/latest`, { headers });
-  if (!res.ok) throw new Error(`Lecture impossible (${res.status})`);
+  if (!res.ok) throw await apiError(res);
   return res.json();
 }
 
@@ -255,7 +292,7 @@ async function apiUpdate(binId, apiKey, data) {
     body,
     keepalive: canKeepalive,
   });
-  if (!res.ok) { const t = await res.text(); throw new Error(t); }
+  if (!res.ok) throw await apiError(res);
   return res.json();
 }
 
@@ -324,7 +361,7 @@ function SetupScreen({ onDone }) {
       const id = await apiCreate(apiKey.trim(), data);
       const cfg = { apiKey: apiKey.trim(), binId: id, mode:"owner" };
       saveCfg(cfg); onDone(cfg);
-    } catch(e) { setErr("Erreur : " + (e.message||"Clé invalide ou problème réseau.")); }
+    } catch(e) { setErr(apiErrorText(e)); }
     setLoading(false);
   }
 
@@ -336,7 +373,11 @@ function SetupScreen({ onDone }) {
       await apiRead(reconnectBinId.trim(), reconnectKey.trim());
       const cfg = { apiKey: reconnectKey.trim(), binId: reconnectBinId.trim(), mode:"owner" };
       saveCfg(cfg); onDone(cfg);
-    } catch(e) { setErr("BIN ID ou clé incorrects. Vérifiez vos informations."); }
+    } catch(e) {
+      // Ce message disait toujours « BIN ID ou clé incorrects », même quand la
+      // clé était bonne et que le quota JSONbin était simplement épuisé.
+      setErr(apiErrorText(e));
+    }
     setLoading(false);
   }
 
@@ -347,7 +388,7 @@ function SetupScreen({ onDone }) {
       await apiRead(binId.trim());
       const cfg = { binId: binId.trim(), mode:"reader" };
       saveCfg(cfg); onDone(cfg);
-    } catch(e) { setErr("BIN ID introuvable. Vérifiez l'identifiant."); }
+    } catch(e) { setErr(apiErrorText(e)); }
     setLoading(false);
   }
 
@@ -735,8 +776,8 @@ function SettingsModal({ cfg, onClose, onReset, onUpdateKey }) {
       await apiRead(cfg.binId, newKey.trim());
       onUpdateKey(newKey.trim());
       setNewKey("");
-    } catch {
-      setNewKeyErr("Clé invalide ou introuvable. Vérifiez sur jsonbin.io → API Keys.");
+    } catch (e) {
+      setNewKeyErr(apiErrorText(e));
     }
     setNewKeyLoading(false);
   }
@@ -869,6 +910,7 @@ export default function App() {
   const [syncState, setSyncState] = useState("idle");
   const [showSettings, setShowSettings] = useState(false);
   const [keyInvalid, setKeyInvalid] = useState(false);
+  const [quotaExhausted, setQuotaExhausted] = useState(false);
   const saveTimer = useRef(null);
   const isSavingRef = useRef(false);
   const toastTimer  = useRef(null);
@@ -918,33 +960,43 @@ export default function App() {
     apiRead(binId, apiKey)
       .then(data => {
         if (cancelled) return;
-        const remoteTime = new Date(data.updatedAt || 0).getTime();
-        const cacheTime  = cache?.t || 0;
+        // JSONbin fait autorité, SAUF si une sauvegarde locale n'a jamais abouti :
+        // dans ce cas on reprend ce travail et on le repousse pour resynchroniser.
+        const unsaved = pendingCache(cache);
         let source = data;
-        if (cacheTime > remoteTime && cache?.remote) {
-          // Le cache local est plus récent que JSONbin (sauvegarde précédente n'a pas abouti)
-          // On utilise le cache ET on re-pousse vers JSONbin pour resynchroniser
-          source = cache.remote;
+        if (unsaved) {
+          source = unsaved;
           if (mode === "owner" || mode === "contributor") {
-            apiUpdate(binId, apiKey, source).catch(() => {});
+            apiUpdate(binId, apiKey, source)
+              .then(() => saveLocalCache(binId, source, false))
+              .catch(() => {});
           }
         }
         setSections(mergeData(source));
         setSyncState("saved");
         setLoading(false);
       })
-      .catch(() => {
+      .catch((e) => {
         if (cancelled) return;
-        // Hors-ligne : utiliser le cache si disponible
+        // Hors-ligne (ou API en erreur) : utiliser le cache si disponible
         const source = cache?.remote || buildInitialData();
         setSections(mergeData(source));
-        showToast("⚠ Chargement hors-ligne", "err");
+        if (e?.quotaExhausted) { setQuotaExhausted(true); showToast("⚠ Quota JSONbin épuisé", "err", 6000); }
+        else if (e?.authError) { setKeyInvalid(true); showToast("⚠ " + apiErrorText(e), "err", 6000); }
+        else showToast("⚠ Chargement hors-ligne", "err");
         setLoading(false);
       });
     return () => { cancelled = true; };
   }, [cfg?.binId, cfg?.apiKey, showToast]);
 
-  // ── Polling toutes les 15s (tous les modes) ──
+  // ── Rafraîchissement périodique (tous les modes) ──
+  // Le forfait gratuit JSONbin donne 10 000 requêtes UNE SEULE FOIS, jamais
+  // renouvelées. L'ancien intervalle de 15 s consommait ~5 700 requêtes par jour
+  // et par onglet ouvert — proches compris, puisque leurs lectures sont
+  // décomptées du compte des parents. Le stock partait en 2 jours, puis JSONbin
+  // répondait 403 « Requests exhausted » à tout, y compris aux sauvegardes.
+  // Désormais : 60 s, rien quand l'onglet est en arrière-plan, arrêt après
+  // 3 échecs consécutifs, et lecture immédiate au retour sur l'onglet.
   useEffect(() => {
     if (!cfg?.binId) return;
     const { binId, apiKey } = cfg;
@@ -952,31 +1004,43 @@ export default function App() {
     // pendant qu'une fenêtre « Modèles » est ouverte (son formulaire est un
     // instantané : le rafraîchir en arrière-plan ferait réécrire des données périmées).
     const busy = () => isSavingRef.current || dirtyRef.current || pendingRef.current !== null;
-    const t = setInterval(() => {
-      if (busy() || modalRef.current?.type === "models") return;
+    let failures = 0;
+    let stopped = false;
+
+    const refresh = () => {
+      if (stopped || document.hidden || busy() || modalRef.current?.type === "models") return;
       apiRead(binId, apiKey).then(data => {
+        failures = 0;
         if (busy() || modalRef.current?.type === "models") return;
-        const cache = loadLocalCache(binId);
-        const remoteTime = new Date(data.updatedAt || 0).getTime();
-        const cacheTime  = cache?.t || 0;
-        const source = (cacheTime > remoteTime && cache?.remote) ? cache.remote : data;
+        // Le distant fait autorité : seul du travail local non confirmé le supplante.
+        const source = pendingCache(loadLocalCache(binId)) || data;
         setSections(mergeData(source));
-      }).catch(()=>{});
-    }, 15000);
-    return () => clearInterval(t);
+      }).catch(e => {
+        // Inutile de brûler le quota restant en boucle sur une erreur permanente
+        if (e?.quotaExhausted || e?.authError || ++failures >= 3) stopped = true;
+        if (e?.quotaExhausted) setQuotaExhausted(true);
+      });
+    };
+
+    const t = setInterval(refresh, 60000);
+    const onVisible = () => { if (!document.hidden) refresh(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(t); document.removeEventListener("visibilitychange", onVisible); };
   }, [cfg?.binId, cfg?.apiKey]);
 
   // ── Save helpers ──
   const doSave = useCallback(async (nextSections) => {
     if (cfg?.mode !== "owner" && cfg?.mode !== "contributor") { dirtyRef.current = false; return false; }
     const remote = sectionsToRemote(nextSections);
-    // Écriture synchrone dans localStorage AVANT l'appel réseau :
-    // même si la page est rechargée pendant la sauvegarde, le cache survit.
-    saveLocalCache(cfg.binId, remote);
+    // Écriture synchrone dans localStorage AVANT l'appel réseau, marquée « pending » :
+    // même si la page est rechargée pendant la sauvegarde, le travail survit.
+    saveLocalCache(cfg.binId, remote, true);
     isSavingRef.current = true;
     setSyncState("saving");
     try {
       await apiUpdate(cfg.binId, cfg.apiKey, remote);
+      // Confirmé par JSONbin : le cache cesse de faire autorité sur le distant.
+      saveLocalCache(cfg.binId, remote, false);
       dirtyRef.current = false;
       setSyncState("saved");
       showToast("✓ Synchronisé", "sync");
@@ -985,15 +1049,14 @@ export default function App() {
       // On garde dirtyRef à true : le polling ne doit pas remplacer un travail
       // local qui n'a pas encore atteint JSONbin.
       setSyncState("error");
-      const raw = e.message || "";
-      let parsed = {};
-      try { parsed = JSON.parse(raw); } catch {}
-      const isAuthErr = (parsed.message || raw).toLowerCase().includes("invalid") || raw.includes("401") || raw.includes("403");
-      if (isAuthErr) {
+      if (e.quotaExhausted) {
+        setQuotaExhausted(true);
+        showToast("⚠ Quota JSONbin épuisé — sauvegarde impossible", "err", 8000);
+      } else if (e.authError) {
         setKeyInvalid(true);
-        showToast("⚠ Clé JSONbin invalide — ouvrez ⚙️ pour la mettre à jour", "err", 8000);
+        showToast("⚠ Master Key refusée — ouvrez ⚙️ pour la mettre à jour", "err", 8000);
       } else {
-        showToast("⚠ " + (parsed.message || raw || "Erreur de sauvegarde"), "err", 6000);
+        showToast("⚠ " + apiErrorText(e), "err", 6000);
       }
       return false;
     } finally {
@@ -1020,9 +1083,9 @@ export default function App() {
     if (!mode || !canWrite) return;
     pendingRef.current = null;
     clearTimeout(saveTimer.current);
-    // Cache écrit immédiatement : un rechargement pendant le délai anti-rebond
-    // ne perd plus la modification.
-    saveLocalCache(cfg.binId, sectionsToRemote(sections));
+    // Cache écrit immédiatement et marqué « pending » : un rechargement pendant
+    // le délai anti-rebond ne perd plus la modification.
+    saveLocalCache(cfg.binId, sectionsToRemote(sections), true);
     if (mode === "now") doSave(sections);
     else saveTimer.current = setTimeout(() => doSave(sections), 900);
   }, [sections, canWrite, cfg?.binId, doSave]);
@@ -1170,8 +1233,20 @@ export default function App() {
           </div>
         </div>
 
+        {/* Quota JSONbin épuisé — prioritaire : tant qu'il l'est, la clé n'y est pour rien */}
+        {quotaExhausted && (
+          <div style={{ background:"rgba(196,131,106,.15)",borderBottom:"1.5px solid rgba(196,131,106,.4)",padding:"14px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap" }}>
+            <div style={{ fontSize:13,color:C.terra,lineHeight:1.6 }}>
+              <strong>Quota JSONbin épuisé — ce n'est pas votre clé.</strong> Le compte a consommé ses 10 000 requêtes offertes (allouées une seule fois, non renouvelées).
+              {isOwner
+                ? <> Vos modifications restent sur cet appareil mais ne peuvent plus être partagées. Rachetez des requêtes sur <a href="https://jsonbin.io/pricing" target="_blank" rel="noopener noreferrer" style={{ color:C.terra,fontWeight:700 }}>jsonbin.io/pricing</a>, ou créez un nouveau compte et renseignez sa Master Key dans ⚙️.</>
+                : <> Prévenez les parents : la liste ne peut plus être mise à jour pour le moment.</>}
+            </div>
+          </div>
+        )}
+
         {/* Key invalid banner */}
-        {keyInvalid && (
+        {keyInvalid && !quotaExhausted && (
           <div style={{ background:"rgba(196,131,106,.15)",borderBottom:"1.5px solid rgba(196,131,106,.4)",padding:"14px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap" }}>
             <div style={{ fontSize:13,color:C.terra,lineHeight:1.5 }}>
               {isOwner ? (
