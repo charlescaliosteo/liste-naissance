@@ -255,10 +255,13 @@ async function apiError(res) {
 
 // Message en français, actionnable, pour l'utilisateur final.
 function apiErrorText(e) {
+  if (e?.storageUnconfigured) return "Le stockage n'est pas encore activé sur ce projet Vercel (Storage → Create → Blob).";
+  if (e?.reservationsOnly)    return "Ce lien famille ne permet de modifier que les réservations.";
   if (e?.quotaExhausted) return "Quota JSONbin épuisé — le compte a consommé ses 10 000 requêtes offertes. Rachetez des requêtes sur jsonbin.io ou créez un nouveau compte.";
   if (e?.tooLarge)       return "Liste trop volumineuse pour un compte gratuit JSONbin (limite 100 Ko).";
-  if (e?.notFound)       return "Liste introuvable : vérifiez le BIN ID.";
-  if (e?.authError)      return "Master Key refusée : soit elle a été regénérée, soit cette liste appartient à un autre compte jsonbin.";
+  if (e?.notFound)       return "Liste introuvable : vérifiez le lien.";
+  if (e?.authError)      return "Lien ou clé refusés : le lien n'est plus valide, ou la Master Key a changé.";
+  if (e?.offline)        return "Problème réseau — vérifiez votre connexion.";
   return e?.message || "Problème réseau.";
 }
 
@@ -295,6 +298,53 @@ async function apiUpdate(binId, apiKey, data) {
   if (!res.ok) throw await apiError(res);
   return res.json();
 }
+
+// ─── Stockage Vercel Blob (nouveau backend) ──────────────────────────────────
+// Le secret reste sur le serveur. Les liens de partage ne portent qu'un jeton
+// propre à CETTE liste, au lieu de la Master Key de tout le compte JSONbin.
+const LIST_API = "/api/list";
+
+async function httpJson(url, opts) {
+  let res;
+  try { res = await fetch(url, opts); }
+  catch { const e = new Error("Problème réseau."); e.offline = true; throw e; }
+  let body = {};
+  try { body = await res.json(); } catch {}
+  if (!res.ok) {
+    const err = new Error(body.message || body.error || `Erreur ${res.status}`);
+    err.status = res.status;
+    err.notFound = res.status === 404;
+    err.authError = res.status === 403;
+    err.storageUnconfigured = body.error === "storage_unconfigured";
+    err.reservationsOnly = body.error === "reservations_only";
+    throw err;
+  }
+  return body;
+}
+
+const jsonPost = (url, payload, method="POST") => httpJson(url, {
+  method, headers:{ "Content-Type":"application/json" }, body: JSON.stringify(payload),
+});
+
+async function blobCreate(data)                { return jsonPost(LIST_API, { data }); }
+async function blobRead(listId, token)         {
+  const q = token ? `&token=${encodeURIComponent(token)}` : "";
+  return httpJson(`${LIST_API}?id=${encodeURIComponent(listId)}${q}`);
+}
+async function blobUpdate(listId, token, data) { return jsonPost(`${LIST_API}?id=${encodeURIComponent(listId)}`, { data, token }, "PUT"); }
+
+// ─── Aiguillage ──────────────────────────────────────────────────────────────
+// Une liste créée avant la migration garde `binId` et continue sur JSONbin ;
+// les nouvelles ont `listId` et passent par le serveur.
+const isLegacy  = (cfg) => !!cfg?.binId && !cfg?.listId;
+const storeId   = (cfg) => cfg?.listId || cfg?.binId || null;
+// Renvoie toujours { data, familyToken? } — familyToken n'arrive qu'au propriétaire.
+async function storeRead(cfg) {
+  if (isLegacy(cfg)) return { data: await apiRead(cfg.binId, cfg.apiKey) };
+  const b = await blobRead(cfg.listId, cfg.token);
+  return { data: b.data, familyToken: b.familyToken };
+}
+const storeWrite = (cfg, data) => isLegacy(cfg) ? apiUpdate(cfg.binId, cfg.apiKey, data) : blobUpdate(cfg.listId, cfg.token, data);
 
 // ─── UI primitives ────────────────────────────────────────────────────────────
 const btn = (extra={}) => ({ borderRadius:11, padding:"11px 16px", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", border:"none", ...extra });
@@ -353,13 +403,12 @@ function SetupScreen({ onDone }) {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
 
+  // Plus aucune clé à fournir : le stockage est géré par le serveur.
   async function handleOwner() {
-    if (!apiKey.trim()) return setErr("Veuillez entrer votre Master Key.");
     setLoading(true); setErr("");
     try {
-      const data = buildInitialData();
-      const id = await apiCreate(apiKey.trim(), data);
-      const cfg = { apiKey: apiKey.trim(), binId: id, mode:"owner" };
+      const { id, ownerToken, familyToken } = await blobCreate(buildInitialData());
+      const cfg = { listId:id, token:ownerToken, familyToken, mode:"owner" };
       saveCfg(cfg); onDone(cfg);
     } catch(e) { setErr(apiErrorText(e)); }
     setLoading(false);
@@ -382,11 +431,14 @@ function SetupScreen({ onDone }) {
   }
 
   async function handleReader() {
-    if (!binId.trim()) return setErr("Veuillez entrer le BIN ID partagé.");
+    const id = binId.trim();
+    if (!id) return setErr("Veuillez entrer l'identifiant partagé.");
     setLoading(true); setErr("");
     try {
-      await apiRead(binId.trim());
-      const cfg = { binId: binId.trim(), mode:"reader" };
+      // Un identifiant de 24 caractères hexadécimaux = nouvelle liste ;
+      // sinon c'est un BIN ID JSONbin d'avant la migration.
+      const cfg = /^[a-f0-9]{24}$/.test(id) ? { listId:id, mode:"reader" } : { binId:id, mode:"reader" };
+      await storeRead(cfg);
       saveCfg(cfg); onDone(cfg);
     } catch(e) { setErr(apiErrorText(e)); }
     setLoading(false);
@@ -410,18 +462,14 @@ function SetupScreen({ onDone }) {
 
         {tab === "owner" && (
           <div>
-            <div style={{ background:"rgba(122,158,135,.08)", border:"1.5px solid rgba(122,158,135,.2)", borderRadius:12, padding:"12px 14px", marginBottom:18, fontSize:13, color:C.slate, lineHeight:1.6 }}>
-              <strong style={{ color:C.sage, display:"block", marginBottom:4 }}>📋 Comment obtenir votre clé ?</strong>
-              1. Allez sur <a href="https://jsonbin.io" target="_blank" rel="noopener noreferrer" style={{ color:C.terra, fontWeight:600 }}>jsonbin.io</a> → créez un compte gratuit<br/>
-              2. Dashboard → <strong>API Keys</strong> → copiez votre <strong>Master Key</strong>
+            <div style={{ background:"rgba(122,158,135,.08)", border:"1.5px solid rgba(122,158,135,.2)", borderRadius:12, padding:"14px 16px", marginBottom:18, fontSize:13, color:C.slate, lineHeight:1.6 }}>
+              <strong style={{ color:C.sage, display:"block", marginBottom:4 }}>Aucun compte à créer</strong>
+              Votre liste est hébergée directement ici. Vous obtiendrez ensuite un lien
+              à envoyer sur WhatsApp pour que vos proches puissent réserver les articles.
             </div>
-            <FL>Master Key JSONbin</FL>
-            <div style={{ position:"relative" }}>
-              <FInput value={apiKey} onChange={setApiKey} placeholder="$2b$10$..." type={showKey?"text":"password"}/>
-              <button onClick={()=>setShowKey(v=>!v)} style={{ position:"absolute", right:10, top:10, background:"none", border:"none", cursor:"pointer", color:"#9a8a7a", fontSize:16 }}>{showKey?"🙈":"👁️"}</button>
-            </div>
-            <div style={{ fontSize:12, color:"#9a8a7a", marginTop:-8, marginBottom:16, lineHeight:1.5 }}>
-              Votre clé ne sera jamais partagée. Elle reste sur cet appareil uniquement.
+            <div style={{ fontSize:12, color:"#9a8a7a", marginBottom:16, lineHeight:1.5 }}>
+              Pensez à garder cet appareil ou à copier votre lien co-parent : c'est lui qui
+              vous donne l'accès complet à la liste.
             </div>
             {err && <div style={{ color:C.terra, fontSize:13, marginBottom:12 }}>⚠ {err}</div>}
             <button onClick={handleOwner} disabled={loading} style={{ ...btn({ background:C.ink, color:C.cream }), width:"100%", padding:"13px 0", fontSize:14 }}>
@@ -783,9 +831,16 @@ function SettingsModal({ cfg, onClose, onReset, onUpdateKey }) {
   }
 
   const base = window.location.origin + window.location.pathname;
-  const readerUrl    = `${base}?binId=${cfg.binId}`;
-  const familyUrl    = familyKey.trim() ? `${base}?binId=${cfg.binId}&ck=${encodeURIComponent(familyKey.trim())}` : "";
-  const coparentUrl  = cfg.apiKey ? `${base}?binId=${cfg.binId}&ck=${encodeURIComponent(cfg.apiKey)}&mode=owner` : "";
+  const legacy = isLegacy(cfg);
+  // Nouveau schéma : le lien ne porte qu'un jeton propre à cette liste.
+  // Ancien schéma (listes JSONbin) : il portait la Master Key du compte entier.
+  const readerUrl   = legacy ? `${base}?binId=${cfg.binId}` : `${base}?list=${cfg.listId}`;
+  const familyUrl   = legacy
+    ? (familyKey.trim() ? `${base}?binId=${cfg.binId}&ck=${encodeURIComponent(familyKey.trim())}` : "")
+    : (cfg.familyToken ? `${base}?list=${cfg.listId}&t=${encodeURIComponent(cfg.familyToken)}&r=f` : "");
+  const coparentUrl = legacy
+    ? (cfg.apiKey ? `${base}?binId=${cfg.binId}&ck=${encodeURIComponent(cfg.apiKey)}&mode=owner` : "")
+    : (cfg.token ? `${base}?list=${cfg.listId}&t=${encodeURIComponent(cfg.token)}&r=o` : "");
 
   function copyText(text, setCopied) {
     navigator.clipboard?.writeText(text).then(()=>{ setCopied(true); setTimeout(()=>setCopied(false), 2500); }).catch(()=>{
@@ -799,10 +854,10 @@ function SettingsModal({ cfg, onClose, onReset, onUpdateKey }) {
     <Overlay onClose={onClose}>
       <div style={{ fontFamily:"'Playfair Display',serif",fontSize:20,color:C.ink,fontWeight:600,marginBottom:20 }}>Partager la liste</div>
 
-      {/* BIN ID */}
+      {/* Identifiant de la liste */}
       <div style={{ background:C.warm,borderRadius:12,padding:"14px 16px",marginBottom:12 }}>
-        <div style={{ fontSize:11,letterSpacing:2,textTransform:"uppercase",color:"#9a8a7a",marginBottom:4,fontWeight:700 }}>Votre BIN ID</div>
-        <div style={{ fontSize:14,fontWeight:700,color:C.ink,fontFamily:"monospace",wordBreak:"break-all",marginBottom:8 }}>{cfg.binId}</div>
+        <div style={{ fontSize:11,letterSpacing:2,textTransform:"uppercase",color:"#9a8a7a",marginBottom:4,fontWeight:700 }}>{legacy ? "Votre BIN ID" : "Identifiant de votre liste"}</div>
+        <div style={{ fontSize:14,fontWeight:700,color:C.ink,fontFamily:"monospace",wordBreak:"break-all",marginBottom:8 }}>{storeId(cfg)}</div>
         <div style={{ fontSize:12,color:"#7a6a5a",lineHeight:1.5,marginBottom:10 }}>
           Lien <strong>lecture seule</strong> — vos proches voient la liste et les articles déjà réservés, mais ne peuvent pas réserver eux-mêmes.
         </div>
@@ -824,8 +879,24 @@ function SettingsModal({ cfg, onClose, onReset, onUpdateKey }) {
         </div>
       )}
 
-      {/* Contributor link — owner only */}
-      {cfg.mode === "owner" && (
+      {/* Lien famille — nouveau stockage : rien à saisir, et le jeton ne vaut que pour cette liste */}
+      {cfg.mode === "owner" && !legacy && (
+        <div style={{ background:"rgba(122,158,135,.06)",border:"1.5px solid rgba(122,158,135,.2)",borderRadius:12,padding:"14px 16px",marginBottom:12 }}>
+          <div style={{ fontSize:11,letterSpacing:2,textTransform:"uppercase",color:"#5a8a6a",marginBottom:4,fontWeight:700 }}>🎁 Lien famille (peut réserver)</div>
+          <div style={{ fontSize:12,color:"#5a7a5a",lineHeight:1.6,marginBottom:12 }}>
+            À envoyer à vos proches. Ils pourront cliquer <strong>« J'achète »</strong>, mais rien d'autre :
+            ce lien ne permet ni de modifier ni de supprimer un article.
+          </div>
+          {familyUrl
+            ? <button onClick={()=>copyText(familyUrl, setCopiedFamily)} style={{ ...btn({background:"#7a9e87",color:"white"}), width:"100%", padding:"9px 0", fontSize:13 }}>
+                {copiedFamily ? "✓ Lien copié ! Envoyez-le sur WhatsApp 🎉" : "🔗 Copier le lien famille (WhatsApp)"}
+              </button>
+            : <div style={{ fontSize:12,color:"#9a8a7a" }}>Lien en cours de récupération…</div>}
+        </div>
+      )}
+
+      {/* Contributor link — ancien stockage JSONbin */}
+      {cfg.mode === "owner" && legacy && (
         <div style={{ background:"rgba(122,158,135,.06)",border:"1.5px solid rgba(122,158,135,.2)",borderRadius:12,padding:"14px 16px",marginBottom:12 }}>
           <div style={{ fontSize:11,letterSpacing:2,textTransform:"uppercase",color:"#5a8a6a",marginBottom:4,fontWeight:700 }}>🎁 Lien famille (peut réserver)</div>
           <div style={{ fontSize:12,color:"#5a7a5a",lineHeight:1.6,marginBottom:12 }}>
@@ -852,8 +923,8 @@ function SettingsModal({ cfg, onClose, onReset, onUpdateKey }) {
         </div>
       </div>
 
-      {/* Update key — owner only */}
-      {cfg.mode === "owner" && onUpdateKey && (
+      {/* Update key — uniquement pour les listes JSONbin d'avant la migration */}
+      {cfg.mode === "owner" && legacy && onUpdateKey && (
         <div style={{ background:"rgba(196,131,106,.06)",border:"1.5px solid rgba(196,131,106,.2)",borderRadius:12,padding:"14px 16px",marginBottom:16 }}>
           <div style={{ fontSize:11,letterSpacing:2,textTransform:"uppercase",color:C.terra,marginBottom:4,fontWeight:700 }}>🔑 Mettre à jour la Master Key</div>
           <div style={{ fontSize:12,color:"#7a6a5a",lineHeight:1.5,marginBottom:10 }}>
@@ -885,8 +956,24 @@ export default function App() {
   const [cfg, setCfg] = useState(() => {
     // Connexion automatique via URL params (lien WhatsApp famille)
     const p = new URLSearchParams(window.location.search);
-    const bid = p.get("binId"), ck = p.get("ck"), m = p.get("mode");
     const stored = loadCfg();
+
+    // ── Nouveaux liens : ?list=<id>&t=<jeton>&r=<rôle> ──
+    // Le jeton ne vaut que pour CETTE liste, et le serveur revérifie les droits :
+    // trafiquer `r` ne donne rien de plus qu'un affichage différent.
+    const lid = p.get("list"), tok = p.get("t"), role = p.get("r");
+    if (lid) {
+      if (tok) {
+        const mode = role === "o" ? "owner" : "contributor";
+        if (stored?.listId === lid && stored.mode === "owner" && mode !== "owner") return stored;
+        const c = { listId:lid, token:tok, mode }; saveCfg(c); return c;
+      }
+      if (stored?.listId === lid && stored.token) return stored;
+      const c = { listId:lid, mode:"reader" }; saveCfg(c); return c;
+    }
+
+    // ── Anciens liens JSONbin (listes créées avant la migration) ──
+    const bid = p.get("binId"), ck = p.get("ck"), m = p.get("mode");
     if (bid && ck && m === "owner") { const c = { binId:bid, apiKey:ck, mode:"owner" }; saveCfg(c); return c; }
     if (bid && ck) {
       // Ne pas rétrograder un propriétaire qui ouvrirait son propre lien famille
@@ -934,8 +1021,9 @@ export default function App() {
   // l'historique du navigateur, les captures d'écran ou le referrer.
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
-    if (!p.has("binId") && !p.has("ck") && !p.has("mode")) return;
-    p.delete("binId"); p.delete("ck"); p.delete("mode");
+    const keys = ["list","t","r","binId","ck","mode"];
+    if (!keys.some(k => p.has(k))) return;
+    keys.forEach(k => p.delete(k));
     const q = p.toString();
     window.history.replaceState({}, "", window.location.pathname + (q?`?${q}`:"") + window.location.hash);
   }, []);
@@ -944,8 +1032,9 @@ export default function App() {
   // Dépend aussi de apiKey : après « mettre à jour la Master Key », il faut
   // relire avec la nouvelle clé (sinon toutes les requêtes restaient en 401).
   useEffect(() => {
-    if (!cfg?.binId) { setLoading(false); return; }
-    const { binId, apiKey, mode } = cfg;
+    const sid = storeId(cfg);
+    if (!sid) { setLoading(false); return; }
+    const mode = cfg.mode;
     let cancelled = false;
     // Un rechargement complet remplace l'état en cours : on annule la sauvegarde
     // en attente et on repart d'une synchro propre (sinon un échec précédent
@@ -956,19 +1045,25 @@ export default function App() {
     dirtyRef.current = false;
     setLoading(true);
     clearLegacyDels();
-    const cache = loadLocalCache(binId);
-    apiRead(binId, apiKey)
-      .then(data => {
+    const cache = loadLocalCache(sid);
+    storeRead(cfg)
+      .then(({ data, familyToken }) => {
         if (cancelled) return;
-        // JSONbin fait autorité, SAUF si une sauvegarde locale n'a jamais abouti :
+        // Le propriétaire récupère son jeton famille pour pouvoir régénérer le
+        // lien de partage même sur un appareil où il ne l'avait jamais eu.
+        if (familyToken && familyToken !== cfg.familyToken) {
+          const merged = { ...cfg, familyToken };
+          saveCfg(merged); setCfg(merged);
+        }
+        // Le serveur fait autorité, SAUF si une sauvegarde locale n'a jamais abouti :
         // dans ce cas on reprend ce travail et on le repousse pour resynchroniser.
         const unsaved = pendingCache(cache);
         let source = data;
         if (unsaved) {
           source = unsaved;
           if (mode === "owner" || mode === "contributor") {
-            apiUpdate(binId, apiKey, source)
-              .then(() => saveLocalCache(binId, source, false))
+            storeWrite(cfg, source)
+              .then(() => saveLocalCache(sid, source, false))
               .catch(() => {});
           }
         }
@@ -987,7 +1082,7 @@ export default function App() {
         setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [cfg?.binId, cfg?.apiKey, showToast]);
+  }, [cfg?.listId, cfg?.token, cfg?.binId, cfg?.apiKey, showToast]);
 
   // ── Rafraîchissement périodique (tous les modes) ──
   // Le forfait gratuit JSONbin donne 10 000 requêtes UNE SEULE FOIS, jamais
@@ -998,8 +1093,8 @@ export default function App() {
   // Désormais : 60 s, rien quand l'onglet est en arrière-plan, arrêt après
   // 3 échecs consécutifs, et lecture immédiate au retour sur l'onglet.
   useEffect(() => {
-    if (!cfg?.binId) return;
-    const { binId, apiKey } = cfg;
+    const sid = storeId(cfg);
+    if (!sid) return;
     // On ne rafraîchit jamais par-dessus du travail local non sauvegardé, ni
     // pendant qu'une fenêtre « Modèles » est ouverte (son formulaire est un
     // instantané : le rafraîchir en arrière-plan ferait réécrire des données périmées).
@@ -1009,11 +1104,11 @@ export default function App() {
 
     const refresh = () => {
       if (stopped || document.hidden || busy() || modalRef.current?.type === "models") return;
-      apiRead(binId, apiKey).then(data => {
+      storeRead(cfg).then(({ data }) => {
         failures = 0;
         if (busy() || modalRef.current?.type === "models") return;
         // Le distant fait autorité : seul du travail local non confirmé le supplante.
-        const source = pendingCache(loadLocalCache(binId)) || data;
+        const source = pendingCache(loadLocalCache(sid)) || data;
         setSections(mergeData(source));
       }).catch(e => {
         // Inutile de brûler le quota restant en boucle sur une erreur permanente
@@ -1026,21 +1121,22 @@ export default function App() {
     const onVisible = () => { if (!document.hidden) refresh(); };
     document.addEventListener("visibilitychange", onVisible);
     return () => { clearInterval(t); document.removeEventListener("visibilitychange", onVisible); };
-  }, [cfg?.binId, cfg?.apiKey]);
+  }, [cfg?.listId, cfg?.token, cfg?.binId, cfg?.apiKey]);
 
   // ── Save helpers ──
   const doSave = useCallback(async (nextSections) => {
     if (cfg?.mode !== "owner" && cfg?.mode !== "contributor") { dirtyRef.current = false; return false; }
+    const sid = storeId(cfg);
     const remote = sectionsToRemote(nextSections);
     // Écriture synchrone dans localStorage AVANT l'appel réseau, marquée « pending » :
     // même si la page est rechargée pendant la sauvegarde, le travail survit.
-    saveLocalCache(cfg.binId, remote, true);
+    saveLocalCache(sid, remote, true);
     isSavingRef.current = true;
     setSyncState("saving");
     try {
-      await apiUpdate(cfg.binId, cfg.apiKey, remote);
-      // Confirmé par JSONbin : le cache cesse de faire autorité sur le distant.
-      saveLocalCache(cfg.binId, remote, false);
+      await storeWrite(cfg, remote);
+      // Confirmé par le serveur : le cache cesse de faire autorité sur le distant.
+      saveLocalCache(sid, remote, false);
       dirtyRef.current = false;
       setSyncState("saved");
       showToast("✓ Synchronisé", "sync");
@@ -1085,10 +1181,10 @@ export default function App() {
     clearTimeout(saveTimer.current);
     // Cache écrit immédiatement et marqué « pending » : un rechargement pendant
     // le délai anti-rebond ne perd plus la modification.
-    saveLocalCache(cfg.binId, sectionsToRemote(sections), true);
+    saveLocalCache(storeId(cfg), sectionsToRemote(sections), true);
     if (mode === "now") doSave(sections);
     else saveTimer.current = setTimeout(() => doSave(sections), 900);
-  }, [sections, canWrite, cfg?.binId, doSave]);
+  }, [sections, canWrite, cfg, doSave]);
 
   function updateItem(secId, itemId, patch, immediate=false) {
     update(secs => secs.map(s => s.id!==secId?s:{ ...s, items:s.items.map(i=>i.id!==itemId?i:{ ...i,...patch }) }), immediate);
@@ -1137,6 +1233,28 @@ export default function App() {
   function restoreItem(secId, itemId) {
     update(secs => secs.map(s => s.id!==secId?s:{ ...s,items:s.items.map(i=>i.id!==itemId?i:{...i,hidden:false}) }), true);
     showToast("✓ Article restauré");
+  }
+
+  // ── Migration JSONbin → stockage Vercel ──
+  // Reprend l'état actuellement affiché (qui vient du serveur JSONbin s'il
+  // répond encore, sinon du cache local) et le recrée sur le nouveau stockage.
+  // Rien n'est supprimé chez JSONbin : en cas de problème l'ancienne liste reste.
+  const [migrating, setMigrating] = useState(false);
+  async function migrateToVercel() {
+    if (migrating) return;
+    setMigrating(true);
+    try {
+      clearTimeout(saveTimer.current);
+      const { id, ownerToken, familyToken } = await blobCreate(sectionsToRemote(sections));
+      const next = { listId:id, token:ownerToken, familyToken, mode:"owner" };
+      dirtyRef.current = false; pendingRef.current = null;
+      saveCfg(next); setCfg(next);
+      setQuotaExhausted(false); setKeyInvalid(false);
+      showToast("✓ Liste transférée — pensez à renvoyer le lien famille", "sync", 6000);
+    } catch (e) {
+      showToast("⚠ " + apiErrorText(e), "err", 7000);
+    }
+    setMigrating(false);
   }
 
   function handleUpdateKey(newApiKey) {
@@ -1232,6 +1350,19 @@ export default function App() {
             </div>
           </div>
         </div>
+
+        {/* Migration proposée aux listes encore sur JSONbin */}
+        {isOwner && isLegacy(cfg) && (
+          <div style={{ background:"rgba(122,158,135,.12)",borderBottom:"1.5px solid rgba(122,158,135,.35)",padding:"14px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap" }}>
+            <div style={{ fontSize:13,color:"#4a7a5a",lineHeight:1.6,flex:1,minWidth:240 }}>
+              <strong>Votre liste peut être transférée ici.</strong> Fini le compte JSONbin, sa clé et son quota de 10 000 requêtes.
+              Le lien famille ne contiendra plus votre clé de compte. <strong>Vos articles et réservations sont conservés</strong>, et vous devrez simplement renvoyer les liens de partage.
+            </div>
+            <button onClick={migrateToVercel} disabled={migrating} style={{ ...btn({background:"#7a9e87",color:"white"}),whiteSpace:"nowrap",fontSize:13,padding:"9px 18px",flexShrink:0,opacity:migrating?.6:1 }}>
+              {migrating ? "Transfert…" : "Transférer ma liste →"}
+            </button>
+          </div>
+        )}
 
         {/* Quota JSONbin épuisé — prioritaire : tant qu'il l'est, la clé n'y est pour rien */}
         {quotaExhausted && (
