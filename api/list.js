@@ -77,12 +77,21 @@ function send(res, status, body) {
   res.status(status).json(body);
 }
 
-export default async function handler(req, res) {
-  if (!process.env.BLOB_READ_WRITE_TOKEN) {
-    return send(res, 503, { error: "storage_unconfigured",
-      message: "Le stockage n'est pas encore activé sur ce projet Vercel." });
-  }
+// Ne PAS exiger BLOB_READ_WRITE_TOKEN : quand le store est connecté au projet,
+// Vercel authentifie les fonctions automatiquement (OIDC) et ne crée aucune
+// variable de ce nom. Exiger cette variable faisait répondre « stockage non
+// activé » alors que le store était parfaitement connecté.
+// On tente donc l'opération, et on ne conclut à l'absence de stockage que si le
+// SDK signale lui-même un défaut d'identifiants.
+function isMissingCredentials(e) {
+  const m = `${e?.name || ""} ${e?.message || ""}`.toLowerCase();
+  return m.includes("no token") || m.includes("token is required")
+      || m.includes("blob_read_write_token") || m.includes("missing")
+      || m.includes("not authenticated") || m.includes("unauthorized")
+      || m.includes("forbidden") || m.includes("no store");
+}
 
+export default async function handler(req, res) {
   try {
     if (req.method === "POST") {
       const data = req.body?.data;
@@ -140,6 +149,11 @@ export default async function handler(req, res) {
     res.setHeader("Allow", "GET, POST, PUT");
     return send(res, 405, { error: "method_not_allowed" });
   } catch (e) {
+    if (isMissingCredentials(e)) {
+      return send(res, 503, { error: "storage_unconfigured",
+        message: "Le stockage n'est pas accessible depuis ce déploiement.",
+        detail: e?.message || String(e) });
+    }
     return send(res, 500, { error: "server_error", message: e?.message || "Erreur serveur" });
   }
 }
