@@ -1004,6 +1004,11 @@ export default function App() {
   // Modifications locales pas encore confirmées par JSONbin : tant que c'est vrai,
   // le polling ne doit JAMAIS écraser l'état local.
   const dirtyRef    = useRef(false);
+  // D'où viennent les données affichées : "remote", "cache", ou "vide" (liste
+  // par défaut faute de mieux). Sert de garde-fou avant une migration : migrer
+  // une liste "vide" écraserait le travail réel par le contenu d'usine.
+  const dataOriginRef = useRef(null);
+  const [dataOrigin, setDataOrigin] = useState(null);
   // Sauvegarde demandée par la dernière action locale : null | "debounced" | "now"
   const pendingRef  = useRef(null);
   const isOwner       = cfg?.mode === "owner";
@@ -1067,6 +1072,8 @@ export default function App() {
               .catch(() => {});
           }
         }
+        dataOriginRef.current = unsaved ? "cache" : "remote";
+        setDataOrigin(dataOriginRef.current);
         setSections(mergeData(source));
         setSyncState("saved");
         setLoading(false);
@@ -1075,6 +1082,8 @@ export default function App() {
         if (cancelled) return;
         // Hors-ligne (ou API en erreur) : utiliser le cache si disponible
         const source = cache?.remote || buildInitialData();
+        dataOriginRef.current = cache?.remote ? "cache" : "vide";
+        setDataOrigin(dataOriginRef.current);
         setSections(mergeData(source));
         if (e?.quotaExhausted) { setQuotaExhausted(true); showToast("⚠ Quota JSONbin épuisé", "err", 6000); }
         else if (e?.authError) { setKeyInvalid(true); showToast("⚠ " + apiErrorText(e), "err", 6000); }
@@ -1242,6 +1251,12 @@ export default function App() {
   const [migrating, setMigrating] = useState(false);
   async function migrateToVercel() {
     if (migrating) return;
+    // Garde-fou : ne jamais transférer une liste par défaut. Si ni le serveur ni
+    // le cache n'ont répondu, ce qui est à l'écran n'est pas la vraie liste.
+    if (dataOriginRef.current === "vide") {
+      showToast("⚠ Transfert bloqué : cet appareil n'a pas votre vraie liste", "err", 7000);
+      return;
+    }
     setMigrating(true);
     try {
       clearTimeout(saveTimer.current);
@@ -1352,16 +1367,25 @@ export default function App() {
         </div>
 
         {/* Migration proposée aux listes encore sur JSONbin */}
-        {isOwner && isLegacy(cfg) && (
-          <div style={{ background:"rgba(122,158,135,.12)",borderBottom:"1.5px solid rgba(122,158,135,.35)",padding:"14px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap" }}>
-            <div style={{ fontSize:13,color:"#4a7a5a",lineHeight:1.6,flex:1,minWidth:240 }}>
-              <strong>Votre liste peut être transférée ici.</strong> Fini le compte JSONbin, sa clé et son quota de 10 000 requêtes.
-              Le lien famille ne contiendra plus votre clé de compte. <strong>Vos articles et réservations sont conservés</strong>, et vous devrez simplement renvoyer les liens de partage.
+        {isOwner && isLegacy(cfg) && dataOrigin && (
+          dataOrigin === "vide" ? (
+            <div style={{ background:"rgba(196,131,106,.12)",borderBottom:"1.5px solid rgba(196,131,106,.35)",padding:"14px 20px",fontSize:13,color:C.terra,lineHeight:1.6 }}>
+              <strong>Transfert impossible depuis cet appareil.</strong> Ni le serveur ni la sauvegarde locale n'ont répondu :
+              ce que vous voyez est la liste par défaut, pas la vôtre. Ouvrez le site depuis l'appareil et l'adresse
+              où votre liste s'affiche correctement, puis transférez de là — sinon vous remplaceriez votre liste par une liste vide.
             </div>
-            <button onClick={migrateToVercel} disabled={migrating} style={{ ...btn({background:"#7a9e87",color:"white"}),whiteSpace:"nowrap",fontSize:13,padding:"9px 18px",flexShrink:0,opacity:migrating?.6:1 }}>
-              {migrating ? "Transfert…" : "Transférer ma liste →"}
-            </button>
-          </div>
+          ) : (
+            <div style={{ background:"rgba(122,158,135,.12)",borderBottom:"1.5px solid rgba(122,158,135,.35)",padding:"14px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap" }}>
+              <div style={{ fontSize:13,color:"#4a7a5a",lineHeight:1.6,flex:1,minWidth:240 }}>
+                <strong>Votre liste peut être transférée ici.</strong> Fini le compte JSONbin, sa clé et son quota de 10 000 requêtes.
+                Le lien famille ne contiendra plus votre clé de compte. <strong>Vos articles et réservations sont conservés</strong>, et vous devrez simplement renvoyer les liens de partage.
+                {dataOrigin === "cache" && <><br/><strong>Attention :</strong> ces données viennent de la sauvegarde locale de cet appareil, pas du serveur. Vérifiez que la liste ci-dessous est bien à jour avant de transférer.</>}
+              </div>
+              <button onClick={migrateToVercel} disabled={migrating} style={{ ...btn({background:"#7a9e87",color:"white"}),whiteSpace:"nowrap",fontSize:13,padding:"9px 18px",flexShrink:0,opacity:migrating?.6:1 }}>
+                {migrating ? "Transfert…" : "Transférer ma liste →"}
+              </button>
+            </div>
+          )
         )}
 
         {/* Quota JSONbin épuisé — prioritaire : tant qu'il l'est, la clé n'y est pour rien */}
